@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Load your Memory Mirror context: call get_session_context from the memory-mirror MCP server with the current project path. Review the returned skills, hypotheses, recent sessions, and project memories before starting work. If the server is not yet authenticated, Claude Code will open a browser for OAuth consent automatically.'",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Context compression is imminent. Before it happens, call remember_batch from the memory-mirror MCP server to save any important decisions, insights, architectural choices, rejected approaches, user preferences, or debugging conclusions from this conversation that have not been persisted yet. Be concise — each item should be one clear sentence with enough context to be useful in a future session.'",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Session ending. Call sync_session_context from the memory-mirror MCP server with a structured summary: what was accomplished, key decisions made (with rationale), files changed, and lessons learned. Use the current project directory name and date for the session_id.'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
