@@ -27,6 +27,7 @@ On first use, Claude Code will open your browser to sign in to your Mollow accou
 | `/memory-mirror:what-happened` | Show your recent activity across all connected AI apps |
 | `/memory-mirror:status` | Check connection health and memory stats |
 | `/memory-mirror:sync` | Manually checkpoint the current session |
+| `/memory-mirror:connect` | Switch between production, staging, and local dev environments |
 
 ## Hooks
 
@@ -45,6 +46,18 @@ Memory Mirror learns from your conversations across platforms:
 1. **Observations** — patterns detected in your conversations
 2. **Hypotheses** — repeated patterns elevated for validation
 3. **Skills** — confirmed patterns that inform future sessions
+
+## Environments
+
+The plugin connects to production by default. To switch environments:
+
+```
+/memory-mirror:connect staging
+/memory-mirror:connect dev
+/memory-mirror:connect production
+```
+
+This writes a project-level `.mcp.json` override. Restart Claude Code after switching.
 
 ## Requirements
 
