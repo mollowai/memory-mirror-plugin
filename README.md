@@ -1,6 +1,6 @@
 # Memory Mirror — Claude Code Plugin
 
-Cross-platform AI memory by [Mollow](https://mollow.ai). Remembers your decisions, preferences, and work patterns across Claude Code, Claude.ai, ChatGPT, and every AI you use.
+Cross-platform AI memory by [Mollow](https://mollow.ai). Remembers your decisions, preferences, and work patterns across Claude Code, Claude.ai, ChatGPT, and every AI you use. Private. Portable. Tamper-proof.
 
 ## What it does
 
@@ -43,9 +43,9 @@ The plugin connects to the Memory Mirror MCP server, which stores and retrieves 
 
 Memory Mirror learns from your conversations across platforms:
 
-1. **Observations** — patterns detected in your conversations
-2. **Hypotheses** — repeated patterns elevated for validation
-3. **Skills** — confirmed patterns that inform future sessions
+1. **Noted quietly** — a pattern appears once and Mollow notes it in the background
+2. **Surfaced** — the pattern shows up again and Mollow surfaces it as something it's noticing
+3. **Established** — it keeps showing up, so Mollow treats it as established and adds it to your Mirror
 
 ## Environments
 
