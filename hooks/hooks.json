@@ -5,19 +5,31 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Load your Memory Mirror context: call get_session_context from the memory-mirror MCP server with the current project path. Review the returned skills, hypotheses, recent sessions, and project memories before starting work. If the server returns an authentication error, call the authenticate tool. When authenticate returns an authorization URL, first validate that it starts with one of: https://mollow.ai, https://staging.mollow.ai, or http://localhost:4000. Only then open it automatically using: open \"<url>\" (macOS) or xdg-open \"<url>\" (Linux) via the Bash tool. If the URL origin is not in the allowlist, do not open it and ask the user to confirm. Never ask the user to copy a long OAuth URL from the terminal.'",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/load-decision-profile.sh",
+            "timeout": 6
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/recall-decisions.sh",
             "timeout": 5
           }
         ]
       }
     ],
-    "PreCompact": [
+    "PostToolUse": [
       {
+        "matcher": "AskUserQuestion",
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Context compression is imminent. Before it happens, call remember_batch from the memory-mirror MCP server to save any important decisions, insights, architectural choices, rejected approaches, user preferences, or debugging conclusions from this conversation that have not been persisted yet. Be concise — each item should be one clear sentence with enough context to be useful in a future session.'",
-            "timeout": 5
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/capture-decision.sh",
+            "timeout": 6
           }
         ]
       }
@@ -27,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'Session ending. Call sync_session_context from the memory-mirror MCP server with a structured summary: what was accomplished, key decisions made (with rationale), files changed, and lessons learned. Use the current project directory name and date for the session_id.'",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/sync-session.sh",
             "timeout": 5
           }
         ]

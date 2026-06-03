@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Shared helpers for Memory Mirror hooks.
+#
+# Fail-safe contract: every hook sources this and MUST `exit 0` even on error so
+# it can never block or break a Claude Code session. All network calls are time-
+# boxed and swallow errors.
+#
+# Transport: the hooks call the webapp's single-request REST surface
+# (/api/memory/*) with a `mol_*` key — NOT the MCP JSON-RPC endpoint, which would
+# need an initialize→tools/call handshake per call (too slow for the per-prompt
+# recall hook).
+#
+# Config (injected into the session env by the monorepo's session launchers):
+#   MOLLOW_MEMORY_API_KEY  required — staging mol_* key. Absent => hooks no-op.
+#   MOLLOW_MEMORY_URL      the MCP url (…/mcp/v2). The API base is derived by
+#                          stripping the /mcp/v2 suffix. Public default = prod;
+#                          the monorepo overrides it to staging.
+
+set -uo pipefail
+
+mm_api_base() {
+  local url="${MOLLOW_MEMORY_URL:-https://mollow.ai/mcp/v2}"
+  # Strip an optional trailing slash first so "…/mcp/v2/" still maps to the API
+  # base. Otherwise the /mcp/v2 strip silently fails and every path double-prefixes.
+  url="${url%/}"
+  printf '%s' "${url%/mcp/v2}"
+}
+
+# Preconditions: a key, jq, and curl must be present, and MOLLOW_MEMORY_URL must
+# end in /mcp/v2 — else the hook no-ops. The suffix check is a security guard: a
+# misconfigured URL would otherwise send the mol_* key to `<full_url>/api/memory/*`
+# on whatever host the URL resolves to.
+mm_ready() {
+  [ -n "${MOLLOW_MEMORY_API_KEY:-}" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  command -v curl >/dev/null 2>&1 || return 1
+
+  local url="${MOLLOW_MEMORY_URL:-https://mollow.ai/mcp/v2}"
+  url="${url%/}"
+  if [[ "$url" != */mcp/v2 ]]; then
+    echo "memory-mirror: MOLLOW_MEMORY_URL ('${url}') is missing the /mcp/v2 suffix — refusing to send credentials" >&2
+    return 1
+  fi
+
+  # Never send the bearer key over plaintext to a remote host. Allow http only
+  # for local development — match the host boundary exactly (optional port) so a
+  # prefix like http://localhost.evil.com can't slip through.
+  if [[ "$url" == https://* ]]; then
+    :
+  elif [[ "$url" =~ ^http://(localhost|127\.0\.0\.1)(:[0-9]+)?/mcp/v2$ ]]; then
+    :
+  else
+    echo "memory-mirror: MOLLOW_MEMORY_URL ('${url}') is not HTTPS — refusing to send credentials" >&2
+    return 1
+  fi
+}
+
+# POST JSON body ($2) to path ($1) with timeout ($3, default 3s). Fire-and-forget.
+mm_post() {
+  curl -sS --max-time "${3:-3}" \
+    -X POST "$(mm_api_base)$1" \
+    -H "Authorization: Bearer ${MOLLOW_MEMORY_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "$2" >/dev/null 2>&1 || true
+}
+
+# GET path ($1) with timeout ($2, default 2s) and print the response body.
+mm_get() {
+  curl -sS --max-time "${2:-2}" \
+    -X GET "$(mm_api_base)$1" \
+    -H "Authorization: Bearer ${MOLLOW_MEMORY_API_KEY}" \
+    2>/dev/null || true
+}
+
+# POST JSON body ($2) to path ($1) with timeout ($3, default 2s) and print the
+# response body (for hooks that inject the result as context).
+mm_post_read() {
+  curl -sS --max-time "${3:-2}" \
+    -X POST "$(mm_api_base)$1" \
+    -H "Authorization: Bearer ${MOLLOW_MEMORY_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "$2" \
+    2>/dev/null || true
+}
+
+# Emit additionalContext for SessionStart / UserPromptSubmit. $1 = event name,
+# $2 = context text. No-op when the text is empty.
+mm_emit_context() {
+  [ -z "${2:-}" ] && return 0
+  jq -cn --arg ev "$1" --arg ctx "$2" \
+    '{hookSpecificOutput: {hookEventName: $ev, additionalContext: $ctx}}'
+}
+
+# Best-effort project label from a cwd path.
+mm_project_of() {
+  local cwd="${1:-}"
+  [ -z "$cwd" ] && return 0
+  basename "$cwd"
+}
