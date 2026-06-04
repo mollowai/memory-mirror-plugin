@@ -24,6 +24,7 @@ On first use, Claude Code will open your browser to sign in to your Mollow accou
 |-------|-------------|
 | `/memory-mirror:recall` | Search your memory for past decisions, conversations, and knowledge |
 | `/memory-mirror:remember` | Explicitly save something for future sessions |
+| `/memory-mirror:import-local-memories` | Import your local Claude Code memory files (`~/.claude/projects/<project>/memory/`) into Mollow, with full provenance |
 | `/memory-mirror:what-happened` | Show your recent activity across all connected AI apps |
 | `/memory-mirror:status` | Check connection health and memory stats |
 | `/memory-mirror:sync` | Manually checkpoint the current session |
@@ -33,9 +34,11 @@ On first use, Claude Code will open your browser to sign in to your Mollow accou
 
 The plugin automatically handles session lifecycle:
 
-- **SessionStart** — loads your memory context (skills, recent sessions, project memories)
+- **SessionStart** — loads your memory context (skills, recent sessions, project memories), and syncs this project's local Claude Code memory files into Mollow when they change (silently if a `mol_*` API key is configured, otherwise it nudges you to run `/memory-mirror:import-local-memories`)
 - **PreCompact** — saves unsaved decisions before context compression
 - **Stop** — saves a session summary when you're done
+
+Claude Code's own file-based memories (`~/.claude/projects/<project>/memory/*.md` and `MEMORY.md`) become first-class Mollow memories — searchable across every AI you use — with their original kind, description, and source preserved. Re-importing an edited memory supersedes the older version.
 
 ## How it works
 

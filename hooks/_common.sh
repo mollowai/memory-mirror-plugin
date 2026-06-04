@@ -64,6 +64,17 @@ mm_post() {
     -d "$2" >/dev/null 2>&1 || true
 }
 
+# Like mm_post but returns curl's exit status (0 = delivered, non-zero on
+# network error or HTTP >= 400 via --fail) so a caller can gate follow-up state
+# (e.g. a sync fingerprint) on successful delivery. Still silent.
+mm_post_ok() {
+  curl -fsS --max-time "${3:-3}" \
+    -X POST "$(mm_api_base)$1" \
+    -H "Authorization: Bearer ${MOLLOW_MEMORY_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "$2" >/dev/null 2>&1
+}
+
 # GET path ($1) with timeout ($2, default 2s) and print the response body.
 mm_get() {
   curl -sS --max-time "${2:-2}" \
