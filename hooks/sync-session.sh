@@ -28,7 +28,34 @@ else
   esac
 fi
 
+# Nudge at most ONCE per session. A blocking Stop hook re-fires on every natural
+# stop, and each new user turn clears stop_hook_active, so without state this would
+# block on every single turn. After we nudge once we drop a per-session marker;
+# later stops for the same session see it and let the stop proceed. We can't tell
+# whether the model actually called sync_session_context (a bash hook can't see MCP
+# calls), so "nudged once" is the contract — one reminder, then out of the way.
+session_id=""
+state_dir=""
+marker=""
+if command -v jq >/dev/null 2>&1; then
+  session_id="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
+fi
+# Only dedupe on a session id we can safely turn into a filename (path-traversal
+# guard). Without a usable id, fall back to always-nudge rather than going silent.
+if [ -n "$session_id" ] && [[ "$session_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  state_dir="${TMPDIR:-/tmp}/mollow-memory-sync"
+  marker="${state_dir}/${session_id}.nudged"
+  [ -f "$marker" ] && exit 0
+fi
+
 reason="Before ending this session: call sync_session_context from the mollow-memory MCP server with a structured summary — what was accomplished, key decisions (with rationale), files changed, and lessons learned — using the current project directory name + date as session_id. This backfills decisions the real-time capture hook could not see."
+
+# Record the nudge before emitting it so a follow-up stop won't repeat it. Best-
+# effort: if the marker can't be written we still nudge (a repeat reminder beats
+# a dropped one), staying true to the fail-safe contract.
+if [ -n "$marker" ]; then
+  mkdir -p "$state_dir" 2>/dev/null && : >"$marker" 2>/dev/null || true
+fi
 
 if command -v jq >/dev/null 2>&1; then
   jq -cn --arg reason "$reason" '{decision: "block", reason: $reason}'
