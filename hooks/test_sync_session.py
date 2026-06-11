@@ -33,12 +33,12 @@ def run_hook(payload: dict, state_dir: Path) -> subprocess.CompletedProcess:
 
 
 def assert_blocks(result: subprocess.CompletedProcess) -> dict:
-    """The hook blocked the stop: exit 0, stdout is a {decision: block, reason} doc."""
+    """The hook nudged: exit 0, stdout is a {systemMessage: ...} doc."""
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip(), "expected a block decision on stdout, got nothing"
+    assert result.stdout.strip(), "expected a nudge on stdout, got nothing"
     doc = json.loads(result.stdout)
-    assert doc["decision"] == "block"
-    assert doc["reason"].strip()
+    assert "systemMessage" in doc
+    assert doc["systemMessage"].strip()
     return doc
 
 
@@ -51,7 +51,7 @@ def assert_does_not_block(result: subprocess.CompletedProcess) -> None:
 def test_first_stop_blocks(tmp_path):
     result = run_hook({"session_id": "sess-A", "stop_hook_active": False}, tmp_path)
     doc = assert_blocks(result)
-    assert "sync_session_context" in doc["reason"]
+    assert "sync_session_context" in doc["systemMessage"]
 
 
 def test_second_stop_same_session_does_not_block(tmp_path):
