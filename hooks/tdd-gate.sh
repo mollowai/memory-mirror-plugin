@@ -49,23 +49,111 @@ case "$FILE_PATH" in
   *) REL="$FILE_PATH" ;;
 esac
 
-# Classify + derive the expected test path. Only implementation logic is gated;
-# everything else (tests, configs, .heex, migrations, docs) falls through to allow.
+# Classify + derive the expected test path candidates. Only implementation logic
+# is gated; tests, configs, .heex, migrations, docs, and vendored deps fall
+# through to allow. Each arm sets PRIMARY (named in the block message) and
+# CANDIDATES (newline-separated acceptable test paths) — the edit is allowed if
+# ANY candidate appears in this session's working-tree changes. When the file
+# doesn't clearly map to a separate test, fall through to allow (fail-safe).
+name="$(basename "$REL")"
+dir="$(dirname "$REL")"
+stem="${name%.*}" # basename without its final extension
+
+PRIMARY=""
+CANDIDATES=""
+
 case "$REL" in
+  # Vendored / generated trees are never first-party logic.
+  */deps/* | */node_modules/* | */_build/* | */out/* | */dist/*)
+    exit 0
+    ;;
+
+  # Elixir.
   */lib/*.ex | lib/*.ex)
     if [[ "$REL" == lib/* ]]; then
-      EXPECTED="test/${REL#lib/}"
+      PRIMARY="test/${REL#lib/}"
     else
-      EXPECTED="${REL/\/lib\//\/test\/}"
+      PRIMARY="${REL/\/lib\//\/test\/}"
     fi
-    EXPECTED="${EXPECTED%.ex}_test.exs"
+    PRIMARY="${PRIMARY%.ex}_test.exs"
+    CANDIDATES="$PRIMARY"
     ;;
+
+  # Python (webapp ML).
   webapp/priv/python/*.py)
-    case "$(basename "$REL")" in
-      test_*.py | *_test.py) exit 0 ;;
-    esac
-    EXPECTED="$(dirname "$REL")/test_$(basename "${REL%.py}").py"
+    case "$name" in test_*.py | *_test.py) exit 0 ;; esac
+    PRIMARY="${dir}/test_${stem}.py"
+    CANDIDATES="$PRIMARY"
     ;;
+
+  # VS Code extensions (Mocha; tests under <ext>/src/test/suite).
+  extensions/*/src/*.ts | extensions/*/src/*.tsx)
+    case "$REL" in
+      *.d.ts | *.test.ts | *.test.tsx | *.spec.ts | *.spec.tsx | */src/test/*) exit 0 ;;
+    esac
+    ext_root="${REL%%/src/*}"
+    sub="${REL#"${ext_root}"/src/}"
+    PRIMARY="${ext_root}/src/test/suite/${stem}.test.ts"
+    CANDIDATES="${PRIMARY}
+${ext_root}/src/test/suite/${sub%.*}.test.ts"
+    ;;
+
+  # webapp/assets/js (Jest; co-located __tests__).
+  webapp/assets/js/*.ts | webapp/assets/js/*.tsx)
+    case "$REL" in
+      *.d.ts | *.test.ts | *.test.tsx | *.spec.ts | *.spec.tsx) exit 0 ;;
+      */__tests__/* | */__mocks__/* | webapp/assets/js/types/*) exit 0 ;;
+    esac
+    PRIMARY="${dir}/__tests__/${stem}.test.ts"
+    CANDIDATES="${PRIMARY}
+${dir}/__tests__/${stem}.test.tsx"
+    ;;
+
+  # browser-extension (Vitest; flat test/).
+  browser-extension/src/*.js | browser-extension/src/*.ts)
+    case "$REL" in
+      *.d.ts | *.test.js | *.test.ts | *.spec.js | *.spec.ts) exit 0 ;;
+    esac
+    PRIMARY="browser-extension/test/${stem}.test.js"
+    CANDIDATES="$PRIMARY"
+    ;;
+
+  # iOS Swift (XCTest target).
+  ios/MollowWorkstation/MollowWorkstation/*.swift)
+    case "$REL" in
+      */MollowWorkstationTests/* | *Tests.swift) exit 0 ;;
+    esac
+    PRIMARY="ios/MollowWorkstation/MollowWorkstationTests/${stem}Tests.swift"
+    CANDIDATES="$PRIMARY"
+    ;;
+
+  # Rust (bridge). Tests live in an external module file (idiomatic
+  # `#[cfg(test)] mod tests;` -> <name>/tests.rs) or a tests/ integration file.
+  bridge/tauri-app/src-tauri/src/*.rs)
+    case "$REL" in
+      *_test.rs | *_tests.rs | */tests.rs | */tests/* | */build.rs) exit 0 ;;
+    esac
+    # Transitional: existing files still using inline #[cfg(test)] blocks count
+    # as tested, so ongoing bridge work isn't blocked before migration.
+    if [ -f "${REPO_ROOT}/${REL}" ] && grep -q '#\[cfg(test)\]' "${REPO_ROOT}/${REL}" 2>/dev/null; then
+      exit 0
+    fi
+    PRIMARY="${dir}/${stem}/tests.rs"
+    CANDIDATES="${PRIMARY}
+bridge/tauri-app/src-tauri/tests/${stem}.rs"
+    ;;
+
+  # Shell (scripts/; test-<name>.sh convention). Noisiest tier — bypass per the
+  # block message when a script genuinely has no unit test to write.
+  scripts/*.sh)
+    case "$name" in test-*.sh) exit 0 ;; esac
+    case "$REL" in scripts/tests/*) exit 0 ;; esac
+    PRIMARY="${dir}/test-${stem}.sh"
+    CANDIDATES="${PRIMARY}
+scripts/test-${stem}.sh
+scripts/tests/test-${stem}.sh"
+    ;;
+
   *) exit 0 ;;
 esac
 
@@ -76,14 +164,19 @@ CHANGED="$(
     git ls-files --others --exclude-standard 2>/dev/null
   }
 )"
-if printf '%s\n' "$CHANGED" | grep -Fxq "$EXPECTED"; then
-  exit 0
-fi
+while IFS= read -r cand; do
+  [ -z "$cand" ] && continue
+  if printf '%s\n' "$CHANGED" | grep -Fxq "$cand"; then
+    exit 0
+  fi
+done <<EOF
+$CANDIDATES
+EOF
 
 reason="TDD is on (your Engram preference). No test changes detected for this implementation file.
 
 Write or extend the failing test first:
-  ${EXPECTED}
+  ${PRIMARY}
 then implement:
   ${REL}
 
