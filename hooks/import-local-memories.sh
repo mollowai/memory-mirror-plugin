@@ -43,15 +43,26 @@ fingerprint="$(
 
 state_dir="${HOME}/.mollow"
 state_file="${state_dir}/memory-sync-state.json"
-prev="$(jq -r --arg s "$slug" '.[$s] // empty' "$state_file" 2>/dev/null || true)"
-[ "$fingerprint" = "$prev" ] && exit 0  # unchanged since last sync
 
-remember_fingerprint() {
+# State is namespaced so "we nudged the user" is never mistaken for "memories
+# are in Mollow". `synced` is written ONLY after a successful import; `nudged`
+# only throttles the OAuth-mode prompt. A bare legacy `{slug: fp}` entry is
+# ignored (treated as not-yet-synced), so it re-imports/re-nudges once.
+read_state() { # $1 = namespace (synced|nudged)
+  jq -r --arg ns "$1" --arg s "$slug" '.[$ns][$s] // empty' "$state_file" 2>/dev/null || true
+}
+
+# Already imported this exact content — nothing to do.
+[ "$fingerprint" = "$(read_state synced)" ] && exit 0
+
+remember_fingerprint() { # $1 = namespace (synced|nudged)
+  local ns="$1"
   mkdir -p "$state_dir" 2>/dev/null || return 0
   [ -f "$state_file" ] || echo '{}' >"$state_file"
   local tmp
   tmp="$(mktemp 2>/dev/null)" || return 0
-  if jq --arg s "$slug" --arg f "$fingerprint" '.[$s]=$f' "$state_file" >"$tmp" 2>/dev/null; then
+  if jq --arg ns "$ns" --arg s "$slug" --arg f "$fingerprint" \
+       '.[$ns][$s]=$f' "$state_file" >"$tmp" 2>/dev/null; then
     mv "$tmp" "$state_file" 2>/dev/null || rm -f "$tmp"
   else
     rm -f "$tmp"
@@ -76,16 +87,22 @@ if mm_ready && [ -n "$python_bin" ]; then
         printf '%s' "$entries" \
           | jq -c 'def chunks(n): [range(0; length; n) as $i | .[$i:$i+n]]; chunks(100)[]' 2>/dev/null
       )
-      [ "$all_ok" -eq 1 ] && remember_fingerprint
+      [ "$all_ok" -eq 1 ] && remember_fingerprint synced
     ) >/dev/null 2>&1 &
   else
-    # Nothing to import — record the fingerprint so we don't re-extract until change.
-    remember_fingerprint
+    # Nothing to import — record as synced so we don't re-extract until change.
+    remember_fingerprint synced
   fi
   exit 0
 fi
 
 # ── OAuth-only mode: nudge Claude to import via the MCP tool ─────────────────
+# This path CANNOT import (no key), so it never writes `synced` — that would
+# strand the memories (the I1 bug). It only throttles its own prompt: skip when
+# we've already nudged for this exact content. A real import (the keyed path
+# above, or the native app's `bridge/memory_sync`) is what marks `synced`.
+[ "$fingerprint" = "$(read_state nudged)" ] && exit 0
+
 count=""
 if [ -n "$python_bin" ]; then
   count="$("$python_bin" "$DIR/../scripts/extract-local-memories.py" --project "$cwd" 2>/dev/null | jq 'length' 2>/dev/null || true)"
@@ -98,6 +115,7 @@ else
 fi
 
 mm_emit_context "SessionStart" "$msg"
-# Nudge once per change-set so we don't nag every session if the user defers.
-remember_fingerprint
+# Throttle: record under `nudged` (NOT `synced`) so we re-prompt when the
+# content changes but never claim the memories reached Mollow.
+remember_fingerprint nudged
 exit 0

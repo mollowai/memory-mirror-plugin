@@ -35,23 +35,31 @@ def test_parse_frontmatter_top_level_scalars():
 
 
 def test_parse_frontmatter_nested_metadata_type():
-    # `type` nested under `metadata:` must still resolve (both PyYAML and fallback).
+    # `type` nested under `metadata:` must still resolve (via the `_field` reader,
+    # which matches at any indent).
     text = "---\nname: Bar\nmetadata:\n  type: pattern\n  originSessionId: sess-123\n---\nbody\n"
     meta, _ = elm.parse_frontmatter(text)
     assert meta["type"] == "pattern"
     assert meta["originSessionId"] == "sess-123"
 
 
-def test_parse_frontmatter_folded_description(monkeypatch):
-    # Force the non-PyYAML fallback so the folded-scalar reader (`_field`) is exercised.
-    monkeypatch.setattr(elm, "_try_pyyaml", lambda _raw: None)
+def test_parse_frontmatter_folded_description():
     text = "---\nname: Folded\ndescription: >-\n  line one\n  line two\n---\nbody\n"
     meta, _ = elm.parse_frontmatter(text)
     assert meta["description"] == "line one line two"
 
 
-def test_parse_frontmatter_fallback_without_pyyaml(monkeypatch):
-    monkeypatch.setattr(elm, "_try_pyyaml", lambda _raw: None)
+def test_parse_frontmatter_folded_description_blank_line_is_space_joined():
+    # A blank line inside a `>-` block must fold to a single SPACE, not a newline.
+    # This is the deliberate divergence from PyYAML (which would yield "...one\n...two"):
+    # `_field` is the sole parse path so the bytes are identical on every machine and
+    # match the Elixir port (HostAgent.MemoryParser), keeping dedup intact.
+    text = "---\nname: Folded\ndescription: >-\n  para one\n\n  para two\n---\nbody\n"
+    meta, _ = elm.parse_frontmatter(text)
+    assert meta["description"] == "para one para two"
+
+
+def test_parse_frontmatter_quoted_scalar():
     text = '---\nname: "Quoted Name"\ntype: reference\n---\nbody\n'
     meta, body = elm.parse_frontmatter(text)
     assert meta["name"] == "Quoted Name"

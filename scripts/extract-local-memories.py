@@ -12,13 +12,20 @@ Mollow's `import_claude_memories` MCP tool / `POST /api/memory/import`:
 the original Claude Code category (feedback|reference|project|pattern|user|
 memory_index) for provenance.
 
-Deterministic and dependency-free (uses PyYAML if present, else a minimal
-frontmatter reader). Both the `import-local-memories` skill and the auto-sync
-hook call this so parsing has a single source of truth.
+Deterministic and dependency-free: a minimal frontmatter reader (`_field`) is
+the ONLY parse path — deliberately NOT PyYAML. PyYAML folds blank lines in a
+`>-`/`|` block scalar into newlines, so its output for such a `description`
+would depend on whether PyYAML happened to be installed, and would diverge from
+the native app's Elixir port (`HostAgent.MemoryParser`, which mirrors `_field`).
+Keeping a single hand-rolled reader makes the byte output identical on every
+machine and across both collection paths, so they dedup against each other
+instead of double-importing. Both the `import-local-memories` skill and the
+auto-sync hook call this, so parsing has a single source of truth.
 
 CONTRACT — FROZEN: the import dedups on a hash of `content`. The content
-assembly here ("{name}\\n\\n{description}\\n\\n{body}") must never change, or
-re-imports would duplicate instead of dedup.
+assembly here ("{name}\\n\\n{description}\\n\\n{body}") and the `_field`
+frontmatter reader must never change, or re-imports would duplicate instead of
+dedup.
 
 Usage:
     extract-local-memories.py                 # current project (cwd)
@@ -96,39 +103,12 @@ def parse_frontmatter(text):
         return {}, text
     fm_raw, body = m.group(1), m.group(2)
 
-    meta = {}
-    yaml_meta = _try_pyyaml(fm_raw)
-    if yaml_meta is not None:
-        meta = {
-            "name": yaml_meta.get("name"),
-            "description": yaml_meta.get("description"),
-            "type": yaml_meta.get("type") or _nested(yaml_meta, "type"),
-            "originSessionId": yaml_meta.get("originSessionId") or _nested(yaml_meta, "originSessionId"),
-        }
-    else:
-        # `_field` matches at any indent, so it finds `type` whether it sits at
-        # the top level or nested under `metadata:`.
-        for key in ("name", "description", "type", "originSessionId"):
-            meta[key] = _field(fm_raw, key)
+    # `_field` is the single, deliberate parse path (no PyYAML — see module
+    # docstring). It matches at any indent, so it finds `type` whether it sits
+    # at the top level or nested under `metadata:`.
+    meta = {key: _field(fm_raw, key) for key in ("name", "description", "type", "originSessionId")}
 
     return {k: v for k, v in meta.items() if v}, body
-
-
-def _try_pyyaml(raw):
-    try:
-        import yaml  # type: ignore
-    except ImportError:
-        return None
-    try:
-        data = yaml.safe_load(raw)
-    except yaml.YAMLError:
-        return None
-    return data if isinstance(data, dict) else {}
-
-
-def _nested(meta, key):
-    md = meta.get("metadata")
-    return md.get(key) if isinstance(md, dict) else None
 
 
 def resolve_type_and_kind(meta, filename):
