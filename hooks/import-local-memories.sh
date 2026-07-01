@@ -44,15 +44,23 @@ fingerprint="$(
 state_dir="${HOME}/.mollow"
 state_file="${state_dir}/memory-sync-state.json"
 
+# State keys are scoped by TARGET ENV, not just project: `${env}:${slug}`. A
+# `synced` fingerprint recorded against one env must not suppress the push to a
+# different env after a fleet-target switch. Without this, memories synced to
+# staging looked "done" and never reached prod (observed 2026-07-01: 13/221
+# absent from prod). A bare legacy `{slug: fp}` entry (no env prefix) no longer
+# matches `${env}:${slug}`, so it is treated as not-yet-synced and re-syncs once
+# per env — the intended self-heal.
+state_key="$(mm_env_label):${slug}"
+
 # State is namespaced so "we nudged the user" is never mistaken for "memories
 # are in Mollow". `synced` is written ONLY after a successful import; `nudged`
-# only throttles the OAuth-mode prompt. A bare legacy `{slug: fp}` entry is
-# ignored (treated as not-yet-synced), so it re-imports/re-nudges once.
+# only throttles the OAuth-mode prompt.
 read_state() { # $1 = namespace (synced|nudged)
-  jq -r --arg ns "$1" --arg s "$slug" '.[$ns][$s] // empty' "$state_file" 2>/dev/null || true
+  jq -r --arg ns "$1" --arg s "$state_key" '.[$ns][$s] // empty' "$state_file" 2>/dev/null || true
 }
 
-# Already imported this exact content — nothing to do.
+# Already imported this exact content to THIS env — nothing to do.
 [ "$fingerprint" = "$(read_state synced)" ] && exit 0
 
 remember_fingerprint() { # $1 = namespace (synced|nudged)
@@ -61,7 +69,7 @@ remember_fingerprint() { # $1 = namespace (synced|nudged)
   [ -f "$state_file" ] || echo '{}' >"$state_file"
   local tmp
   tmp="$(mktemp 2>/dev/null)" || return 0
-  if jq --arg ns "$ns" --arg s "$slug" --arg f "$fingerprint" \
+  if jq --arg ns "$ns" --arg s "$state_key" --arg f "$fingerprint" \
        '.[$ns][$s]=$f' "$state_file" >"$tmp" 2>/dev/null; then
     mv "$tmp" "$state_file" 2>/dev/null || rm -f "$tmp"
   else

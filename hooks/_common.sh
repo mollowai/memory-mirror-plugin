@@ -26,6 +26,38 @@ mm_api_base() {
   printf '%s' "${url%/mcp/v2}"
 }
 
+# Environment label for the CURRENT target (dev|staging|prod|custom), derived
+# from the API base. Mirrors memory_sync.py `infer_env_from_url` and the
+# fleet-target env→base map. Sync state must be keyed by this: a `synced`
+# fingerprint recorded against one env would otherwise suppress the push to a
+# different env after a fleet-target switch (the silent-drop bug — memories
+# synced to staging never reached prod because the project looked "done").
+mm_env_label() {
+  local base
+  base="$(mm_api_base)"
+  case "$base" in
+    https://mollow.ai) echo prod ;;
+    https://staging.mollow.ai) echo staging ;;
+    http://localhost:4000 | http://127.0.0.1:4000) echo dev ;;
+    # A non-standard base (preview / self-hosted) gets a label derived from the
+    # base itself, not a flat "custom" — otherwise two different custom targets
+    # would share one `${label}:${slug}` sync-state key, and a switch between
+    # them would suppress the required re-import (the very drop this keying
+    # prevents for the standard envs). Short hash keeps the key readable.
+    *)
+      local h
+      if command -v shasum >/dev/null 2>&1; then
+        h="$(printf '%s' "$base" | shasum | awk '{print $1}')"
+      elif command -v sha256sum >/dev/null 2>&1; then
+        h="$(printf '%s' "$base" | sha256sum | awk '{print $1}')"
+      else
+        h="$(printf '%s' "$base" | cksum | awk '{print $1}')"
+      fi
+      printf 'custom-%s' "${h:0:8}"
+      ;;
+  esac
+}
+
 # Preconditions: a key, jq, and curl must be present, and MOLLOW_MEMORY_URL must
 # end in /mcp/v2 — else the hook no-ops. The suffix check is a security guard: a
 # misconfigured URL would otherwise send the mol_* key to `<full_url>/api/memory/*`

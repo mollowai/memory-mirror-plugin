@@ -28,6 +28,7 @@ On first use, Claude Code will open your browser to sign in to your Mollow accou
 | `/memory-mirror:what-happened` | Show your recent activity across all connected AI apps |
 | `/memory-mirror:status` | Check connection health and memory stats |
 | `/memory-mirror:sync` | Manually checkpoint the current session |
+| `/memory-mirror:verify` | Prove which local memory files are present in Mollow (read-only diff), and repair what's missing |
 | `/memory-mirror:connect` | Switch between production, staging, and local dev environments |
 
 ## Hooks
@@ -61,6 +62,37 @@ The plugin connects to production by default. To switch environments:
 ```
 
 This writes a project-level `.mcp.json` override. Restart Claude Code after switching.
+
+## Verifying & repairing local sync
+
+The SessionStart hook records a project as `synced` on HTTP success, keyed by
+`(env, project)` — but if you want to *prove* your local memory files reached
+Mollow (e.g. before shrinking or deleting them), use the `memory-sync` tool
+directly. It diffs local content against `GET /api/memory/export`, so it reports
+what's actually in the cloud rather than trusting local state.
+
+```bash
+# Is everything, across every project, present in the current target env?
+python3 plugins/memory-mirror/scripts/memory_sync.py --all verify
+
+# Where am I pointed, and do the three config sources agree?
+python3 plugins/memory-mirror/scripts/memory_sync.py status
+
+# Push only the entries verify found missing (scope with --dir/--project/--all).
+python3 plugins/memory-mirror/scripts/memory_sync.py --all push --repair
+```
+
+`verify` is read-only and exits non-zero when anything is missing (usable in a
+hook or CI). `push` is idempotent — the server dedups. Target resolution
+precedence: `--env` > injected `$MOLLOW_MEMORY_URL`/`$MOLLOW_MEMORY_API_KEY` >
+`~/.mollow/selected-env` + keyfile > prod.
+
+**Note:** every local memory currently syncs. Per-project / per-memory opt-out
+(so business/financial notes can stay local) is tracked in MOL-2708.
+
+To switch which env everything reports to — `selected-env`, `.envrc`, the
+workers, and `~/.claude.json`'s `mollow-memory` MCP URL, all at once — use
+`scripts/fleet-target.sh <dev|staging|prod>`.
 
 ## Requirements
 
