@@ -125,32 +125,78 @@ def _write(tmp_path, text):
     return p
 
 
-def test_memory_index_skips_pointer_bullets(tmp_path):
+def test_memory_index_chunks_by_section_keeping_pointer_rows(tmp_path):
+    # One entry per section; pointer rows are now KEPT (their curated hooks are
+    # unique index data), alongside inline facts, in document order.
     path = _write(tmp_path, "## Section\n- [Title](some-file.md) — a pointer\n- a real inline fact\n")
     entries = elm.memory_index_entries(path, "proj", skip_ephemeral=False)
-    contents = [e["content"] for e in entries]
-    assert contents == ["Section: a real inline fact"]
+    assert [e["content"] for e in entries] == ["Section\n- [Title](some-file.md) — a pointer\n- a real inline fact"]
+
+
+def test_memory_index_one_entry_per_section(tmp_path):
+    path = _write(tmp_path, "## A\n- one\n- two\n## B\n- three\n")
+    entries = elm.memory_index_entries(path, "proj", skip_ephemeral=False)
+    assert [e["content"] for e in entries] == ["A\n- one\n- two", "B\n- three"]
+    assert [e["name"] for e in entries] == ["a", "b"]
+
+
+def test_memory_index_disambiguates_colliding_section_names(tmp_path):
+    # Two headings that slugify to the same name would otherwise share the
+    # import versioning key (name + source_file + project), so the second
+    # section would supersede — and hide — the first. Distinct names keep both.
+    path = _write(tmp_path, "## Security\n- first fact\n## Security!\n- second fact\n")
+    entries = elm.memory_index_entries(path, "proj", skip_ephemeral=False)
+    assert [e["name"] for e in entries] == ["security", "security-2"]
+    # Content still differs, so both survive content-hash dedup; the disambiguated
+    # names ensure neither supersedes the other on import.
+    assert [e["content"] for e in entries] == ["Security\n- first fact", "Security!\n- second fact"]
+
+
+def test_memory_index_disambiguation_is_stable_across_runs(tmp_path):
+    # Same input, same document order -> identical names every run, so a
+    # re-sync of an unchanged MEMORY.md dedups cleanly.
+    text = "## Dup\n- a\n## Dup\n- b\n## Dup\n- c\n"
+    names = [e["name"] for e in elm.memory_index_entries(_write(tmp_path, text), "proj", skip_ephemeral=False)]
+    assert names == ["dup", "dup-2", "dup-3"]
+
+
+def test_memory_index_disambiguation_avoids_generated_suffix_collision(tmp_path):
+    # A real heading that already looks like a generated suffix must not collide
+    # with a disambiguated duplicate: "Security-2" takes security-2, so the
+    # second "Security" probes past it to security-3.
+    text = "## Security\n- a\n## Security-2\n- b\n## Security\n- c\n"
+    names = [e["name"] for e in elm.memory_index_entries(_write(tmp_path, text), "proj", skip_ephemeral=False)]
+    assert names == ["security", "security-2", "security-3"]
+
+
+def test_memory_index_preserves_multi_link_rows_verbatim(tmp_path):
+    row = "- [Eval](a.md) MOL-1 · [Graph](b.md) MOL-2 · [Fusion](c.md) MOL-3"
+    path = _write(tmp_path, f"## GBrain\n{row}\n")
+    entries = elm.memory_index_entries(path, "proj", skip_ephemeral=False)
+    assert entries[0]["content"] == f"GBrain\n{row}"
 
 
 def test_memory_index_respects_code_fences(tmp_path):
     path = _write(tmp_path, "## S\n```\n- not a fact, inside a fence\n```\n- real fact\n")
     entries = elm.memory_index_entries(path, "proj", skip_ephemeral=False)
-    assert [e["content"] for e in entries] == ["S: real fact"]
+    assert [e["content"] for e in entries] == ["S\n- real fact"]
 
 
-def test_memory_index_h2_h3_context(tmp_path):
+def test_memory_index_h3_subheading_is_body_line(tmp_path):
     path = _write(tmp_path, "## Top\n### Sub\n- nested fact\n")
     entries = elm.memory_index_entries(path, "proj", skip_ephemeral=False)
-    assert entries[0]["content"] == "Top > Sub: nested fact"
+    assert entries[0]["content"] == "Top\n### Sub\n- nested fact"
 
 
-def test_memory_index_skip_ephemeral_drops_host_facts(tmp_path):
+def test_memory_index_skip_ephemeral_drops_host_lines_from_chunk(tmp_path):
     text = "## Infra\n- IP is 100.69.225.80\n- socket at /tmp/foo.sock\n- bind localhost:8080\n- durable fact\n"
     path = _write(tmp_path, text)
     kept = elm.memory_index_entries(path, "proj", skip_ephemeral=True)
-    assert [e["content"] for e in kept] == ["Infra: durable fact"]
-    # Without the flag, all four bullets survive.
-    assert len(elm.memory_index_entries(path, "proj", skip_ephemeral=False)) == 4
+    assert [e["content"] for e in kept] == ["Infra\n- durable fact"]
+    # Without the flag, all four lines stay in the one section chunk.
+    without = elm.memory_index_entries(path, "proj", skip_ephemeral=False)
+    assert len(without) == 1
+    assert without[0]["content"].count("\n") == 4
 
 
 def test_memory_index_entry_shape_and_slug(tmp_path):
@@ -160,7 +206,7 @@ def test_memory_index_entry_shape_and_slug(tmp_path):
     assert entry["source_file"] == "MEMORY.md"
     assert entry["project"] == "myproj"
     assert entry["type"] == "knowledge"
-    assert entry["name"] == elm.slugify("My Section some fact here")[:80]
+    assert entry["name"] == elm.slugify("My Section")[:80]
     assert " " not in entry["name"]
 
 

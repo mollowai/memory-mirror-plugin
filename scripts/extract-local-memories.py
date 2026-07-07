@@ -52,10 +52,6 @@ TYPE_MAP = {
 }
 VALID_TYPES = {"knowledge", "insight", "preference"}
 
-# A MEMORY.md bullet that merely points at an individual memory file — skip it,
-# the file itself is imported separately.
-POINTER_RE = re.compile(r"^\s*-\s*\[.*\]\([^)]*\.md\)")
-BULLET_RE = re.compile(r"^\s*-\s+(.*)$")
 # Host-specific / transient facts that are noise in a durable cross-AI memory.
 EPHEMERAL_RES = [
     re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),  # IPv4 (e.g. a Tailscale IP)
@@ -159,12 +155,54 @@ def file_entry(path: Path, project):
 
 
 def memory_index_entries(path: Path, project, skip_ephemeral):
-    """Inline facts in MEMORY.md that aren't pointers to individual files."""
+    """MEMORY.md as section-level chunks — one entry per top-level (``##``)
+    section, holding all of its lines (pointer bullets, inline facts, ``###``
+    subheadings, multi-link rows) verbatim.
+
+    Pointer rows are kept, not skipped: the curated one-line hooks after each
+    link are unique index data that never reaches the topic files themselves.
+    Chunking by section (rather than per bullet) preserves the human's grouping,
+    keeps multi-link rows coherent, and yields a handful of searchable entries
+    instead of hundreds of context-free fragments. ``content`` is the section
+    heading followed by its lines, blank-line- and fence-stripped;
+    ``skip_ephemeral`` drops host-specific lines (IPs, sockets, localhost ports).
+    """
     text = path.read_text(encoding="utf-8")
 
     entries = []
-    h2 = h3 = None
+    seen_names = set()
+    h2 = None
+    buffer = []
     in_fence = False
+
+    def flush():
+        if h2 is not None and buffer:
+            # Disambiguate headings that slugify to the same name: import keys
+            # supersede on name + source_file + project, so two same-slug
+            # sections in one MEMORY.md would hide each other. First keeps the
+            # bare slug; later collisions get a "-N" suffix, probing past any
+            # name already emitted (so a real "Security-2" heading and a
+            # disambiguated duplicate never land on the same name). Deterministic
+            # in document order, so an unchanged re-sync dedups cleanly.
+            base = slugify(h2)[:80]
+            name = base
+            n = 1
+            while name in seen_names:
+                n += 1
+                name = f"{base}-{n}"
+            seen_names.add(name)
+            entries.append(
+                {
+                    "content": h2 + "\n" + "\n".join(buffer),
+                    "type": "knowledge",
+                    "name": name,
+                    "kind": "memory_index",
+                    "description": None,
+                    "origin_session_id": None,
+                    "source_file": "MEMORY.md",
+                    "project": project,
+                }
+            )
 
     for line in text.split("\n"):
         stripped = line.strip()
@@ -174,37 +212,17 @@ def memory_index_entries(path: Path, project, skip_ephemeral):
         if in_fence:
             continue
         if stripped.startswith("## "):
-            h2, h3 = stripped[3:].strip(), None
+            flush()
+            h2 = stripped[3:].strip()
+            buffer = []
             continue
-        if stripped.startswith("### "):
-            h3 = stripped[4:].strip()
+        if not stripped or h2 is None:
             continue
-        if POINTER_RE.match(line):
+        if skip_ephemeral and any(r.search(stripped) for r in EPHEMERAL_RES):
             continue
-        m = BULLET_RE.match(line)
-        if not m:
-            continue
-        bullet = m.group(1).strip()
-        if not bullet:
-            continue
-        if skip_ephemeral and any(r.search(bullet) for r in EPHEMERAL_RES):
-            continue
+        buffer.append(stripped)
 
-        context = (h2 or "Notes") + (" > " + h3 if h3 else "")
-        content = context + ": " + bullet
-        entries.append(
-            {
-                "content": content,
-                "type": "knowledge",
-                "name": slugify(context + " " + bullet)[:80],
-                "kind": "memory_index",
-                "description": None,
-                "origin_session_id": None,
-                "source_file": "MEMORY.md",
-                "project": project,
-            }
-        )
-
+    flush()
     return entries
 
 
