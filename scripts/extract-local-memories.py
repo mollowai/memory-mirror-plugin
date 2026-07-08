@@ -59,6 +59,15 @@ EPHEMERAL_RES = [
     re.compile(r"\blocalhost:\d+\b"),
 ]
 
+# MEMORY.md index links: `[Title](target.md)`. The micro-hook is the text after
+# the link up to the next link on the line (or EOL). Both the title and hook get
+# attached to the linked topic file's entry as metadata (index_title/index_label).
+LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+# Separator/whitespace stripped from a hook's ends: space, tab, CR, em-dash (—),
+# middle dot (·) — the two separators the index uses between a link and its hook.
+# Regular hyphens are NOT stripped (they carry meaning: MOL-2511, Qwen3-4B).
+LABEL_STRIP = " \t\r—·"
+
 
 def _unquote(value):
     value = value.strip()
@@ -133,7 +142,48 @@ def slugify(text):
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
-def file_entry(path: Path, project):
+def index_labels(text):
+    """Map a topic filename -> (title, label) from MEMORY.md's index links.
+
+    For every `[Title](file.md)` link — including each one in a multi-link row —
+    the label is the micro-hook after the link (text up to the next link or EOL),
+    with the leading/trailing separators (— · whitespace) stripped. First link to
+    a given file wins, so a file referenced from two rows keeps its first hook.
+    URL links and non-`.md` targets are ignored. Keyed by the target's basename,
+    which matches `file_entry`'s `path.name`. Mirrored byte-for-byte by
+    `HostAgent.MemoryParser.index_labels/1`.
+    """
+    labels = {}
+    for line in text.split("\n"):
+        matches = list(LINK_RE.finditer(line))
+        for i, m in enumerate(matches):
+            # Canonicalize before the .md check + keying so a fragment/query link
+            # (`file.md#anchor`, `file.md?v=1`) still resolves to its topic file —
+            # otherwise, with the `indexed` signal, a missed link reads as "unlinked"
+            # and clears the topic's stored label.
+            target = m.group(2).strip().split("#", 1)[0].split("?", 1)[0]
+            if "://" in target or not target.endswith(".md"):
+                continue
+            filename = target.rsplit("/", 1)[-1]
+            if filename in labels:
+                continue
+            hook_end = matches[i + 1].start() if i + 1 < len(matches) else len(line)
+            title = m.group(1).strip() or None
+            hook = line[m.end() : hook_end].strip(LABEL_STRIP) or None
+            labels[filename] = (title, hook)
+    return labels
+
+
+def file_entry(path: Path, project, labels=None):
+    """Build the import entry for one topic file.
+
+    `labels` is the MEMORY.md link map from `index_labels` when the index was
+    processed, or `None` when it wasn't (`--no-index`, or no MEMORY.md). A non-None
+    `labels` marks the entry `indexed: true` — an authoritative statement of the
+    current index state, so the server can clear a stale label when a file is
+    unlinked (absent from the map). `None` leaves the entry unmarked, so a
+    legacy/partial client that simply omits index fields never erases a label.
+    """
     meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
     filename = path.name
     name = meta.get("name") or path.stem
@@ -142,7 +192,7 @@ def file_entry(path: Path, project):
     content = assemble_content(name, description, body)
     if not content:
         return None
-    return {
+    entry = {
         "content": content,
         "type": memory_type,
         "name": name,
@@ -152,6 +202,14 @@ def file_entry(path: Path, project):
         "source_file": filename,
         "project": project,
     }
+    if labels is not None:
+        entry["indexed"] = True
+        title, label = labels.get(filename, (None, None))
+        if title:
+            entry["index_title"] = title
+        if label:
+            entry["index_label"] = label
+    return entry
 
 
 def memory_index_entries(path: Path, project, skip_ephemeral):
@@ -270,16 +328,21 @@ def main():
         if not mdir.is_dir():
             continue
         dirs_seen += 1
+        # Parse MEMORY.md's per-link hooks first so each topic file entry can
+        # carry its index_title/index_label. Gated on --index like the section
+        # chunks: with --no-index we ignore MEMORY.md entirely.
+        index = mdir / "MEMORY.md"
+        # `None` (not `{}`) when the index wasn't processed, so `file_entry` leaves
+        # the entry unmarked instead of asserting "indexed with no links".
+        labels = index_labels(index.read_text(encoding="utf-8")) if args.include_index and index.is_file() else None
         for path in sorted(mdir.glob("*.md")):
             if path.name == "MEMORY.md":
                 continue
-            entry = file_entry(path, project)
+            entry = file_entry(path, project, labels)
             if entry:
                 entries.append(entry)
-        if args.include_index:
-            index = mdir / "MEMORY.md"
-            if index.is_file():
-                entries.extend(memory_index_entries(index, project, args.skip_ephemeral))
+        if args.include_index and index.is_file():
+            entries.extend(memory_index_entries(index, project, args.skip_ephemeral))
 
     json.dump(entries, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")

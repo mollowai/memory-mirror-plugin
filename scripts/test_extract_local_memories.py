@@ -238,5 +238,86 @@ def test_file_entry_name_falls_back_to_stem(tmp_path):
     assert entry["type"] == "insight"
 
 
+def test_file_entry_attaches_index_title_and_label(tmp_path):
+    f = tmp_path / "reference_thing.md"
+    f.write_text("---\nname: Thing\n---\nBody.\n", encoding="utf-8")
+    labels = {"reference_thing.md": ("A Thing", "#42; the hook")}
+    entry = elm.file_entry(f, "p", labels)
+    assert entry["indexed"] is True
+    assert entry["index_title"] == "A Thing"
+    assert entry["index_label"] == "#42; the hook"
+
+
+def test_file_entry_omits_label_keys_when_unlinked_or_empty(tmp_path):
+    f = tmp_path / "reference_thing.md"
+    f.write_text("---\nname: Thing\n---\nBody.\n", encoding="utf-8")
+    # Index processed but this file isn't linked → indexed, no label keys.
+    unlinked = elm.file_entry(f, "p", {})
+    assert unlinked["indexed"] is True
+    assert "index_title" not in unlinked
+    assert "index_label" not in unlinked
+    # Linked but empty hook → title present, label omitted (put_if semantics).
+    entry = elm.file_entry(f, "p", {"reference_thing.md": ("A Thing", None)})
+    assert entry["index_title"] == "A Thing"
+    assert "index_label" not in entry
+
+
+def test_file_entry_unindexed_when_index_not_processed(tmp_path):
+    # labels=None (default / --no-index / no MEMORY.md) → the entry is NOT marked
+    # indexed, so the server won't read absent labels as an unlink+clear signal.
+    f = tmp_path / "reference_thing.md"
+    f.write_text("---\nname: Thing\n---\nBody.\n", encoding="utf-8")
+    for entry in (elm.file_entry(f, "p"), elm.file_entry(f, "p", None)):
+        assert "indexed" not in entry
+        assert "index_title" not in entry
+        assert "index_label" not in entry
+
+
+# ── index_labels ─────────────────────────────────────────────────────────────
+
+
+def test_index_labels_single_link_strips_em_dash_separator():
+    text = "## S\n- [Dash0](reference_dash0.md) — #3062; env label prod/staging\n"
+    assert elm.index_labels(text) == {"reference_dash0.md": ("Dash0", "#3062; env label prod/staging")}
+
+
+def test_index_labels_multi_link_row_each_link_keyed_hook_between_links():
+    text = "## G\n- **GBrain**: [eval](a.md) MOL-1 first · [graph](b.md) MOL-2 CTE · [rrf](c.md)\n"
+    assert elm.index_labels(text) == {
+        "a.md": ("eval", "MOL-1 first"),
+        "b.md": ("graph", "MOL-2 CTE"),
+        "c.md": ("rrf", None),  # last link on the line → empty hook
+    }
+
+
+def test_index_labels_first_link_to_a_file_wins():
+    text = "## A\n- [first hook](dup.md) wins\n## B\n- [second](dup.md) ignored\n"
+    assert elm.index_labels(text)["dup.md"] == ("first hook", "wins")
+
+
+def test_index_labels_ignores_urls_and_non_md_targets():
+    text = "## S\n- [site](https://example.com) x · [img](pic.png) y · [ok](topic.md) keep\n"
+    assert elm.index_labels(text) == {"topic.md": ("ok", "keep")}
+
+
+def test_index_labels_canonicalizes_fragment_and_query_targets():
+    # `file.md#anchor` / `file.md?v=1` must resolve to the topic file, not be
+    # skipped (which, with the indexed signal, would clear the topic's label).
+    text = "## S\n- [Frag](topic_alpha.md#details) hook · [Query](topic_beta.md?v=1) other\n"
+    assert elm.index_labels(text) == {
+        "topic_alpha.md": ("Frag", "hook"),
+        "topic_beta.md": ("Query", "other"),
+    }
+
+
+def test_index_labels_keeps_interior_hyphens():
+    # Regular hyphens carry meaning and must survive; only —/· separators strip.
+    text = "## S\n- [cap](project_macos_activity_capture.md) — MOL-2511 CGEventTap→Engram\n"
+    assert elm.index_labels(text)["project_macos_activity_capture.md"] == (
+        "cap",
+        "MOL-2511 CGEventTap→Engram",
+    )
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
