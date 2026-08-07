@@ -134,6 +134,66 @@ mm_emit_context() {
     '{hookSpecificOutput: {hookEventName: $ev, additionalContext: $ctx}}'
 }
 
+# Merge a JSON array of strings into one key of a JSON object on disk, under a
+# lock. $1 = file, $2 = key, $3 = JSON array. Returns non-zero without writing if
+# another process holds the lock.
+#
+# The lock exists because the read-modify-write races. `recall-decisions.sh` fires
+# on every UserPromptSubmit and this machine runs many sessions at once, so two
+# hooks overlap in practice; each rewrites the file from its own snapshot and the
+# later `mv` discards the earlier one's keys. A lost key means an already-shown
+# contradiction is injected into context a second time.
+#
+# `mkdir` is the test-and-set, not `flock` — macOS ships no flock(1), and these
+# hooks run on the developer's Mac.
+#
+# It RETRIES, briefly and boundedly. Taking the lock once and giving up looked
+# defensible — a declined write is no worse than the unlocked behaviour — but it
+# made an ordinary two-session overlap drop a key, which is the exact failure the
+# lock was added to prevent. The retry is affordable because this runs AFTER the
+# context has been emitted, so the injected advisory is already in hand and the
+# only cost is hook teardown latency: ~$MM_SEEN_LOCK_ATTEMPTS × 20ms worst case.
+#
+# Past that budget it still gives up rather than blocking the turn. Under that
+# much contention a dropped key re-shows one advisory once; the guarantee that
+# holds unconditionally is that the file is never left corrupt.
+mm_seen_add() {
+  local file="$1" key="$2" additions="$3"
+  local lock="${file}.lock" tmp="${file}.$$"
+  local attempts="${MM_SEEN_LOCK_ATTEMPTS:-40}"
+  local dir tries=0
+  dir="$(dirname "$file")"
+  mkdir -p "$dir" 2>/dev/null || return 1
+
+  until mkdir "$lock" 2>/dev/null; do
+    # A hook killed mid-write must not wedge seen-state forever, so a lock older
+    # than a minute is treated as abandoned. No live holder can be that old: the
+    # critical section is two jq calls and a rename.
+    if [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+      rmdir "$lock" 2>/dev/null || true
+    else
+      sleep 0.02
+    fi
+
+    tries=$((tries + 1))
+    [ "$tries" -ge "$attempts" ] && return 1
+  done
+
+  # Second branch covers an absent or corrupt file: start the key fresh rather
+  # than losing the write.
+  if jq -c --arg k "$key" --argjson new "$additions" \
+    '(. // {}) | .[$k] = (((.[$k] // []) + $new) | unique | .[-500:])' \
+    "$file" 2>/dev/null >"$tmp" ||
+    jq -nc --arg k "$key" --argjson new "$additions" '{($k): $new}' >"$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
+
+  rmdir "$lock" 2>/dev/null || true
+  return 0
+}
+
 # Best-effort project label from a cwd path.
 mm_project_of() {
   local cwd="${1:-}"
