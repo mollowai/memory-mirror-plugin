@@ -194,9 +194,120 @@ mm_seen_add() {
   return 0
 }
 
-# Best-effort project label from a cwd path.
+# mm_repo_of <cwd>
+#
+# Echoes a stable identity for the repository containing <cwd>, or nothing when
+# <cwd> is not in one. The identity is the same from a primary checkout, a
+# linked worktree, and a separate clone — which is the whole point, because the
+# label this replaces was `basename "$cwd"` and therefore recorded ONE
+# repository under three different names depending on where the session sat.
+#
+# Preference order:
+#
+#   1. `remote.origin.url`, normalized to `host/owner/repo`. Stable by
+#      definition: worktrees inherit it and clones carry it.
+#   2. The MAIN repository's directory name, via `--git-common-dir`. From a
+#      worktree that resolves to `<primary>/.git`, so the fallback names the
+#      primary checkout rather than the worktree — using `--show-toplevel` here
+#      would reintroduce the exact bug this replaces.
+#
+# Never errors: a missing git, a non-repo path and an empty argument all yield
+# empty output, because every caller is a hook that must not break a session.
+mm_repo_of() {
+  local cwd="${1:-}"
+  [ -n "$cwd" ] && [ -d "$cwd" ] || return 0
+  command -v git >/dev/null 2>&1 || return 0
+  git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+  local url
+  url="$(git -C "$cwd" config --get remote.origin.url 2>/dev/null || true)"
+
+  # A local filesystem path is not a portable identity. Yolo agent clones point
+  # origin at `/workspaces/monorepo`, and normalizing that as a URL yields
+  # `workspaces/monorepo` — a fake identity that splits those clones off from the
+  # repository they are copies of, which is the bug this function exists to fix.
+  #
+  # Follow it ONE hop to the real upstream when that path is reachable (it is
+  # inside the container where such clones live). When it is not, fall back to
+  # the path's basename: still stable, still the same for every clone sharing
+  # that upstream, and the same shape as the no-remote fallback below.
+  case "$url" in
+    /* | ./* | ../* | ~*)
+      local hop
+      hop="$(git -C "$url" config --get remote.origin.url 2>/dev/null || true)"
+      case "$hop" in
+        # Unreachable, or the hop target is ITSELF a local path (a chain of local
+        # clones). Either way there is no portable identity to be had, and
+        # falling through to URL normalization would strip the leading slash and
+        # emit `workspaces/repo` — the fake-identity shape this exists to remove.
+        # Degrade to the basename of the deepest point actually resolved.
+        "" | /* | ./* | ../* | ~*)
+          basename "${hop:-$url}" | sed -E 's#\.git$##'
+          return 0
+          ;;
+        *) url="$hop" ;;
+      esac
+      ;;
+  esac
+
+  if [ -n "$url" ]; then
+    # scp-style `git@host:owner/repo`, `ssh://git@host/...`, and `https://...`
+    # all reduce to `host/owner/repo`; a trailing `.git` is dropped.
+    #
+    # Order matters. The user@ prefix is removed WITHOUT substituting a slash —
+    # an earlier version wrote `/` there, which then defeated the `^` anchor on
+    # the colon rule and left scp-style URLs as `host:owner/repo`. A `:port` is
+    # stripped before the scp colon rule so `ssh://git@host:22/o/r` does not
+    # become `host/22/o/r`.
+    printf '%s\n' "$url" \
+      | sed -E 's#^[a-z+]+://##; s#^[^@/]+@##; s#:[0-9]+/#/#; s#:#/#; s#\.git$##; s#^/+##; s#/+$##'
+    return 0
+  fi
+
+  local common
+  common="$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  [ -n "$common" ] || return 0
+  basename "$(dirname "$common")"
+}
+
+# mm_path_of <cwd>
+#
+# Echoes <cwd> relative to its repository root — empty at the root, `webapp` in
+# a subdirectory — or nothing outside a repository. This is the finer-grained
+# half of the scope: `repo` says which repository, `path` says which part of it.
+mm_path_of() {
+  local cwd="${1:-}"
+  [ -n "$cwd" ] && [ -d "$cwd" ] || return 0
+  command -v git >/dev/null 2>&1 || return 0
+  git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+
+  local prefix
+  prefix="$(git -C "$cwd" rev-parse --show-prefix 2>/dev/null || true)"
+  printf '%s\n' "${prefix%/}"
+}
+
+# mm_project_of <cwd>
+#
+# The project label written onto memories and decisions. Now the repo identity
+# rather than the directory name, so the same repository records under one value
+# from every session shape.
+#
+# Outside a repository it degrades to the old basename: those directories have
+# no better identity available, and returning nothing would silently drop the
+# label entirely for non-repo work.
+#
+# The pre-normalization value is NOT discarded — callers send it as
+# `source_project` so the change stays lossless and the memory-version supersede
+# chain keeps a discriminator that did not collapse.
 mm_project_of() {
   local cwd="${1:-}"
   [ -z "$cwd" ] && return 0
-  basename "$cwd"
+
+  local repo
+  repo="$(mm_repo_of "$cwd")"
+  if [ -n "$repo" ]; then
+    printf '%s\n' "$repo"
+  else
+    basename "$cwd"
+  fi
 }

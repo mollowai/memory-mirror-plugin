@@ -20,6 +20,18 @@ input="$(cat)"
 cwd="$(jq -r '.cwd // empty' <<<"$input" 2>/dev/null || true)"
 sid="$(jq -r '.session_id // empty' <<<"$input" 2>/dev/null || true)"
 project="$(mm_project_of "$cwd")"
+# The scope dimensions. Empty values are OMITTED rather than sent as "": absent
+# has to mean "unknown, predates the dimension" and present has to mean "known",
+# or a filter cannot tell them apart. `path` is the case that bites — mm_path_of
+# returns "" both AT the repo root (known) and outside a repo (unknown) — so it
+# is sent only when a repo was resolved, where "" unambiguously means the root.
+#
+# `source_project` preserves what the label used to be —
+# the directory basename — so redefining `project` to the repo identity stays
+# lossless and the original discriminator is never destroyed.
+repo="$(mm_repo_of "$cwd")"
+path="$(mm_path_of "$cwd")"
+source_project="$(basename "${cwd:-.}")"
 
 # 1) Structured form (only if tool_response is an object with .answers).
 pairs="$(jq -c '
@@ -44,7 +56,8 @@ fi
 echo "$pairs" | jq -c '.[]?' 2>/dev/null | while IFS= read -r pair; do
   [ -z "$pair" ] && continue
   body="$(jq -cn --argjson pair "$pair" --argjson input "$input" \
-    --arg project "$project" --arg sid "$sid" '
+    --arg project "$project" --arg sid "$sid" \
+    --arg repo "$repo" --arg path "$path" --arg source_project "$source_project" '
     $pair.question as $q
     | ($input.tool_input.questions // [] | map(select(.question == $q)) | .[0].options // []) as $opts
     | {
@@ -52,8 +65,11 @@ echo "$pairs" | jq -c '.[]?' 2>/dev/null | while IFS= read -r pair; do
         chosen: $pair.chosen,
         rejected: [$opts[] | select(.label != $pair.chosen) | {label, description}],
         project: $project,
-        session_id: $sid
-      }' 2>/dev/null || true)"
+        session_id: $sid,
+        source_project: $source_project
+      }
+    | (if $repo == "" then . else . + {repo: $repo} end)
+    | (if $path == "" and $repo == "" then . else . + {path: $path} end)' 2>/dev/null || true)"
   # Synchronous (not backgrounded): a backgrounded curl can be SIGHUP-killed when
   # the hook process exits. The POST is sub-second and the hook timeout is 6s.
   [ -n "$body" ] && mm_post "/api/memory/decisions" "$body" 3
