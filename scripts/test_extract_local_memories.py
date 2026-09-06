@@ -321,3 +321,63 @@ def test_index_labels_keeps_interior_hyphens():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ── --repo (MOL-4740 / MOL-4502 step 5) ─────────────────────────────────────
+#
+# `repo` is the destination map's key; `project` beside it is the directory
+# slug, which survives canonicalization unchanged and can never match a route
+# row. Without `repo` on the entry, every memory this producer syncs through
+# POST /api/memory/import resolves to the private workspace.
+
+
+def _run_extractor(tmp_path, extra_args):
+    """Run the extractor CLI over a one-file fixture and return its entries."""
+    import json
+    import subprocess
+    import sys
+
+    root = tmp_path / "projects"
+    mdir = root / "-Users-x-dev-thing" / "memory"
+    mdir.mkdir(parents=True)
+    (mdir / "reference_a.md").write_text(
+        "---\nname: reference_a\ndescription: a thing\nmetadata:\n  type: reference\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+
+    script = Path(__file__).resolve().parent / "extract-local-memories.py"
+    out = subprocess.run(
+        [sys.executable, str(script), "--dir", str(mdir), *extra_args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(out.stdout)
+
+
+def test_repo_is_omitted_when_not_given(tmp_path):
+    # Parity with the Elixir parser's golden test depends on this: an absent
+    # --repo must add no key at all, not an empty one.
+    entries = _run_extractor(tmp_path, [])
+
+    assert entries, "precondition: the fixture must produce an entry"
+    for entry in entries:
+        assert "repo" not in entry
+
+
+def test_repo_is_attached_to_every_entry_when_given(tmp_path):
+    entries = _run_extractor(tmp_path, ["--repo", "github.com/mollowai/monorepo"])
+
+    assert entries
+    for entry in entries:
+        assert entry["repo"] == "github.com/mollowai/monorepo"
+
+
+def test_repo_and_project_stay_distinct(tmp_path):
+    # The whole reason for a second field. Collapsing them would feed a slug to
+    # the map, which cannot match a route row.
+    entries = _run_extractor(tmp_path, ["--repo", "github.com/mollowai/monorepo"])
+
+    for entry in entries:
+        assert entry["project"] == "-Users-x-dev-thing"
+        assert entry["repo"] != entry["project"]

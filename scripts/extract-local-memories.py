@@ -318,6 +318,16 @@ def main():
     ap.add_argument(
         "--skip-ephemeral", action="store_true", help="Drop host-specific facts (IPs, socket paths, localhost ports)."
     )
+    ap.add_argument(
+        "--repo",
+        help=(
+            "The destination map's key for these memories (github.com/owner/name). "
+            "Distinct from the project slug: the slug survives canonicalization "
+            "unchanged and can never match a route row (MOL-4740). Omitted when "
+            "absent, which is what keeps entry-for-entry parity with the Elixir "
+            "parser's golden test."
+        ),
+    )
     ap.add_argument("--verbose", action="store_true", help="Print a summary to stderr.")
     args = ap.parse_args()
 
@@ -343,6 +353,14 @@ def main():
                 entries.append(entry)
         if args.include_index and index.is_file():
             entries.extend(memory_index_entries(index, project, args.skip_ephemeral))
+
+    # Applied here, not inside `file_entry`/`memory_index_entries`: those two are
+    # the frozen contract the Elixir port asserts byte-parity against, and adding
+    # a key inside them would break `memory_parser_golden_test.exs`. The Elixir
+    # side attaches `repo` one layer up too, in `MemoryReader`.
+    if args.repo:
+        for entry in entries:
+            entry["repo"] = args.repo
 
     json.dump(entries, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")

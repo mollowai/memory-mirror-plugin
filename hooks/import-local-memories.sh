@@ -30,14 +30,30 @@ mem_dir="${HOME}/.claude/projects/${slug}/memory"
 [ -d "$mem_dir" ] || exit 0
 ls "$mem_dir"/*.md >/dev/null 2>&1 || exit 0
 
+# `repo` is the destination map's key; `project` beside it stays the directory
+# slug. Derived with the same `mm_repo_of` the decision hooks use, so all three
+# producers key off one rule (MOL-4740).
+mm_repo="$(mm_repo_of "$cwd" 2>/dev/null || true)"
+
 # Cheap content fingerprint (portable: shasum | sha256sum | cksum).
+#
+# The repo is folded in because it is part of what gets SENT, not just of what
+# is read. Without it, every existing user's fingerprint still matches, the
+# early exit below fires, and their memories are never re-posted with a `repo` —
+# they stay in the private workspace until their content happens to change, so
+# the routing change would be inert for exactly the people who already use it.
+#
+# Same self-heal the `${env}:${slug}` state key relies on: the value changes, the
+# old entry stops matching, and each affected project re-syncs once. Folding it
+# into the fingerprint rather than bumping a one-off version marker also keeps
+# this correct later — repointing a remote changes the repo and re-syncs.
 fingerprint="$(
   if command -v shasum >/dev/null 2>&1; then
-    cat "$mem_dir"/*.md 2>/dev/null | shasum | awk '{print $1}'
+    { printf '%s\n' "$mm_repo"; cat "$mem_dir"/*.md 2>/dev/null; } | shasum | awk '{print $1}'
   elif command -v sha256sum >/dev/null 2>&1; then
-    cat "$mem_dir"/*.md 2>/dev/null | sha256sum | awk '{print $1}'
+    { printf '%s\n' "$mm_repo"; cat "$mem_dir"/*.md 2>/dev/null; } | sha256sum | awk '{print $1}'
   else
-    cat "$mem_dir"/*.md 2>/dev/null | cksum | awk '{print $1}'
+    { printf '%s\n' "$mm_repo"; cat "$mem_dir"/*.md 2>/dev/null; } | cksum | awk '{print $1}'
   fi
 )"
 
@@ -81,7 +97,11 @@ python_bin="$(command -v python3 || true)"
 
 # ── Keyed silent mode: parse + POST directly ────────────────────────────────
 if mm_ready && [ -n "$python_bin" ]; then
-  entries="$("$python_bin" "$DIR/../scripts/extract-local-memories.py" --project "$cwd" 2>/dev/null || true)"
+  if [ -n "$mm_repo" ]; then
+    entries="$("$python_bin" "$DIR/../scripts/extract-local-memories.py" --project "$cwd" --repo "$mm_repo" 2>/dev/null || true)"
+  else
+    entries="$("$python_bin" "$DIR/../scripts/extract-local-memories.py" --project "$cwd" 2>/dev/null || true)"
+  fi
   if [ -n "$entries" ] && [ "$entries" != "[]" ]; then
     # Server caps a batch at 100 — chunk and POST each. Backgrounded so
     # SessionStart returns immediately; server dedup keeps it idempotent. The
