@@ -49,7 +49,7 @@ if [ -n "$session_id" ] && [[ "$session_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
   [ -f "$marker" ] && exit 0
 fi
 
-reason="Reminder: call sync_session_context (mollow-memory MCP) before ending — summarize what was accomplished, key decisions, files changed, and lessons, using the project dir name + date as session_id."
+reason="Reminder: call sync_session_context (mollow-memory MCP) before ending — summarize what was accomplished, key decisions, files changed, and lessons, using the project dir name + date as session_id. Pass project = the project dir BASENAME (not the repo URL): it is the scope the summary is filed under, and dedupe on session_id means a wrong scope cannot be corrected afterwards."
 
 # Record the nudge before emitting it so a follow-up stop won't repeat it. Best-
 # effort: if the marker can't be written we still nudge (a repeat reminder beats
