@@ -87,6 +87,58 @@ mm_ready() {
   fi
 }
 
+# Supply mode (MOL-5857) opt-in. Both supply hooks load into EVERY Claude Code
+# session on this machine, so a call on every prompt in every session is the
+# blast radius. The guard is therefore local and explicit: it must gate the call
+# BEFORE the 2s budget is spent, independent of the server-side `supply_mode`
+# flag (which 404s the endpoint but only after the request has already been
+# made). Absent/anything-but-a-true-token => off. Kept here, not in each hook, so
+# the two hooks cannot drift on what "on" means.
+mm_supply_enabled() {
+  local v
+  v="$(printf '%s' "${MOLLOW_SUPPLY_MODE:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$v" in
+    1 | true | yes | on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# True when $1 is safe to use as a single filesystem path component: non-empty,
+# only [A-Za-z0-9._-], and neither `.`/`..` nor containing a `..` sequence. The
+# supply hooks build receipt paths from `session_id` and `grounding_id`; a bare
+# charset check still admits `..`, which would resolve a receipt dir to its
+# parent and (with a chmod) restrict the shared temp dir (Greptile, PR #6160).
+mm_safe_component() {
+  local v="${1:-}"
+  [ -n "$v" ] || return 1
+  case "$v" in
+    . | ..) return 1 ;;
+    *..*) return 1 ;;
+    *[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# POST JSON body ($2) to the supply seam path ($1) with timeout ($3, default 2s)
+# and print the response body.
+#
+# NOT mm_post_read: the `/seam/v1/*` endpoints authenticate the CALLER from
+# `x-mollow-api-key` (the memory API's `Authorization: Bearer` header carries the
+# PROVIDER credential on the relay routes and would be consumed by an auth plug),
+# and resolve a workspace-scoped key from `x-mollow-workspace-id`. A space-scoped
+# key names its own tenant and ignores the workspace header. Same base as the
+# memory API — `mm_api_base` strips `/mcp/v2`, and `/seam/v1/...` sits at the
+# root — so this reuses the same MOLLOW_MEMORY_* config and the mm_ready guards.
+mm_seam_post_read() {
+  local path="$1" body="$2" timeout="${3:-2}"
+  local args=(-sS --max-time "$timeout" -X POST "$(mm_api_base)$path"
+    -H "x-mollow-api-key: ${MOLLOW_MEMORY_API_KEY}"
+    -H "Content-Type: application/json")
+  [ -n "${MOLLOW_SUPPLY_WORKSPACE_ID:-}" ] &&
+    args+=(-H "x-mollow-workspace-id: ${MOLLOW_SUPPLY_WORKSPACE_ID}")
+  curl "${args[@]}" -d "$body" 2>/dev/null || true
+}
+
 # POST JSON body ($2) to path ($1) with timeout ($3, default 3s). Fire-and-forget.
 mm_post() {
   curl -sS --max-time "${3:-3}" \
