@@ -82,6 +82,29 @@ reset_case() {
 
 curl_called() { [ -s "$CURL_LOG" ]; }
 
+# A transcript whose assistant turn BOTH answers and calls a fetch tool. $1 = file,
+# $2 = uri passed to the tool (empty for none), $3 = answer text.
+ptr_transcript() {
+  # $1=file $2=hash ("" for no verify) $3=answer $4=timestamp $5=outcome (default match)
+  local out="$1" hash="$2" text="$3" when="${4:-}" outcome="${5:-match}"
+  local ts
+  ts="${when:-$(date -u +%Y-%m-%dT%H:%M:%S.000Z)}"
+  : >"$out"
+  if [ -n "$hash" ]; then
+    jq -cn --arg h "$hash" --arg ts "$ts" '{timestamp:$ts,type:"assistant",message:{content:[
+      {type:"tool_use",id:"tu_1",name:"mcp__mollow-memory__verify_fetched_bytes",input:{hash:$h,bytes:"..."}}]}}' >>"$out"
+    if [ "${6:-string}" = "array" ]; then
+      jq -cn --arg o "$outcome" --arg ts "$ts" '{timestamp:$ts,type:"user",message:{content:[
+        {type:"tool_result",tool_use_id:"tu_1",content:[{type:"text",text:("{\"outcome\":\"" + $o + "\"}")}]}]}}' >>"$out"
+    else
+      jq -cn --arg o "$outcome" --arg ts "$ts" '{timestamp:$ts,type:"user",message:{content:[
+      {type:"tool_result",tool_use_id:"tu_1",content:("{\"outcome\":\"" + $o + "\"}")}]}}' >>"$out"
+    fi
+  fi
+  jq -cn --arg t "$text" --arg ts "$ts" '{timestamp:$ts,type:"assistant",message:{content:[{type:"text",text:$t}]}}' >>"$out"
+}
+
+
 # A canned facts-mode /ground response with two facts.
 ground_body() {
   cat >"$CASE/ground.json" <<'JSON'
@@ -167,14 +190,15 @@ if printf '%s' "$LAST_OUT" | jq -e '.hookSpecificOutput.additionalContext | test
 else
   fail "ground: injects fact content as additionalContext" "out='$LAST_OUT'"
 fi
-# a receipt was written keyed by grounding_id, holding the message_hashes
+# a receipt was written keyed by grounding_id, holding each fact's citation_key
 RECEIPT="$(find "$TMPDIR" -name 'g-abc-123.json' 2>/dev/null | head -1)"
 if [ -n "$RECEIPT" ] \
   && [ "$(jq -r '.grounding_id' "$RECEIPT")" = "g-abc-123" ] \
-  && [ "$(jq -r '[.facts[].message_hash] | sort | join(",")' "$RECEIPT")" = "mh-fact-one,mh-fact-two" ]; then
-  pass "ground: writes a receipt with grounding_id + each fact's message_hash"
+  && [ "$(jq -r '[.facts[].citation_key] | sort | join(",")' "$RECEIPT")" = "mh-fact-one,mh-fact-two" ] \
+  && [ "$(jq -r '.mode' "$RECEIPT")" = "facts" ]; then
+  pass "ground: writes a receipt with grounding_id + each fact's citation_key"
 else
-  fail "ground: writes a receipt with grounding_id + message_hashes" "receipt='$(cat "$RECEIPT" 2>/dev/null)'"
+  fail "ground: writes a receipt with grounding_id + citation_keys" "receipt='$(cat "$RECEIPT" 2>/dev/null)'"
 fi
 
 # ── workspace id header passed when set ──────────────────────────────────────
@@ -222,7 +246,7 @@ reset_case
 # leave a pending receipt behind so "does it post back" is meaningful
 rdir="$TMPDIR/mollow-supply/sess-S"
 mkdir -p "$rdir"
-echo '{"grounding_id":"g-x","grounded_at":100,"facts":[{"message_hash":"mh1","content":"alpha beta"}]}' >"$rdir/g-x.json"
+echo '{"grounding_id":"g-x","grounded_at":100,"facts":[{"citation_key":"mh1","match_text":"alpha beta"}]}' >"$rdir/g-x.json"
 run_hook "supply-stop.sh" '{"session_id":"sess-S","transcript_path":"/nope","stop_hook_active":false}'
 if [ "$LAST_RC" -eq 0 ] && ! curl_called; then
   pass "stop: opt-in unset ⇒ no post-back, exit 0"
@@ -235,7 +259,7 @@ reset_case
 export MOLLOW_SUPPLY_MODE=on
 rdir="$TMPDIR/mollow-supply/sess-R"
 mkdir -p "$rdir"
-echo '{"grounding_id":"g-y","grounded_at":100,"facts":[{"message_hash":"mh1","content":"alpha"}]}' >"$rdir/g-y.json"
+echo '{"grounding_id":"g-y","grounded_at":100,"facts":[{"citation_key":"mh1","match_text":"alpha"}]}' >"$rdir/g-y.json"
 run_hook "supply-stop.sh" '{"session_id":"sess-R","transcript_path":"/nope","stop_hook_active":true}'
 if [ "$LAST_RC" -eq 0 ] && ! curl_called; then
   pass "stop: stop_hook_active=true ⇒ no post-back (re-entrancy guard)"
@@ -257,8 +281,8 @@ mkdir -p "$rdir"
 # fact-one is quoted verbatim (8+ words) in the answer; fact-two is not mentioned.
 cat >"$rdir/g-z.json" <<'JSON'
 {"grounding_id":"g-z","grounded_at":100,"facts":[
- {"message_hash":"mh-one","content":"the staging deploy uses the pinned commit and skips the gate chain"},
- {"message_hash":"mh-two","content":"an utterly unrelated fact about the phase of the moon tonight"}]}
+ {"citation_key":"mh-one","match_text":"the staging deploy uses the pinned commit and skips the gate chain"},
+ {"citation_key":"mh-two","match_text":"an utterly unrelated fact about the phase of the moon tonight"}]}
 JSON
 # transcript: assistant content as an ARRAY of blocks
 tp="$CASE/transcript.jsonl"
@@ -301,7 +325,7 @@ rdir="$TMPDIR/mollow-supply/sess-STR"
 mkdir -p "$rdir"
 cat >"$rdir/g-str.json" <<'JSON'
 {"grounding_id":"g-str","grounded_at":100,"facts":[
- {"message_hash":"mh-s","content":"the staging deploy uses the pinned commit and skips the gate chain"}]}
+ {"citation_key":"mh-s","match_text":"the staging deploy uses the pinned commit and skips the gate chain"}]}
 JSON
 tp="$CASE/transcript-str.jsonl"
 cat >"$tp" <<'JSON'
@@ -327,7 +351,7 @@ export CURL_BODY_FILE="$CASE/outcome.json"
 echo '{"status":"ok"}' >"$CASE/outcome.json"
 rdir="$TMPDIR/mollow-supply/sess-NT"
 mkdir -p "$rdir"
-echo '{"grounding_id":"g-nt","grounded_at":100,"facts":[{"message_hash":"mh-nt","content":"alpha beta gamma delta epsilon zeta eta theta"}]}' >"$rdir/g-nt.json"
+echo '{"grounding_id":"g-nt","grounded_at":100,"facts":[{"citation_key":"mh-nt","match_text":"alpha beta gamma delta epsilon zeta eta theta"}]}' >"$rdir/g-nt.json"
 run_hook "supply-stop.sh" '{"session_id":"sess-NT","transcript_path":"/does/not/exist","stop_hook_active":false}'
 if grep -q "/seam/v1/outcome" "$CURL_LOG"; then
   POSTED="$(awk 'BEGIN{RS="";} {print}' "$CURL_LOG")"
@@ -360,9 +384,9 @@ export CURL_BODY_FILE="$CASE/outcome.json"
 echo '{"status":"ok"}' >"$CASE/outcome.json"
 rdir="$TMPDIR/mollow-supply/sess-STALE"
 mkdir -p "$rdir"
-echo '{"grounding_id":"g-old","grounded_at":100,"facts":[{"message_hash":"mh-old","content":"an old fact from a previous turn about elephants and giraffes"}]}' >"$rdir/g-old.json"
+echo '{"grounding_id":"g-old","grounded_at":100,"facts":[{"citation_key":"mh-old","match_text":"an old fact from a previous turn about elephants and giraffes"}]}' >"$rdir/g-old.json"
 sleep 1
-echo '{"grounding_id":"g-new","grounded_at":200,"facts":[{"message_hash":"mh-new","content":"the staging deploy uses the pinned commit and skips the gate chain entirely"}]}' >"$rdir/g-new.json"
+echo '{"grounding_id":"g-new","grounded_at":200,"facts":[{"citation_key":"mh-new","match_text":"the staging deploy uses the pinned commit and skips the gate chain entirely"}]}' >"$rdir/g-new.json"
 touch "$rdir/g-new.json"   # ensure g-new is newest by mtime
 tp="$CASE/t-stale.jsonl"
 cat >"$tp" <<'JSON'
@@ -414,6 +438,307 @@ if [ -n "$RF" ]; then
   fi
 else
   fail "ground: receipt perms owner-only" "no receipt written"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# pointer mode (MOL-5936 p6) — its OWN opt-in on top of MOLLOW_SUPPLY_MODE
+# ═══════════════════════════════════════════════════════════════════════════
+
+# A canned pointer-mode /ground response: no content, two DIFFERENT locators with
+# DIFFERENT hashes. Two entries is the minimum that can show a hash paired with
+# the wrong entry's uri — a one-entry fixture cannot express that failure.
+pointer_body() {
+  cat >"$CASE/pointer.json" <<'JSON'
+{"grounding_id":"g-ptr-1","mode":"pointer","facts":[
+  {"citation_key":"rec-aaa","hash":"1111111111111111111111111111111111111111111111111111111111111111",
+   "locator":{"kind":"file","uri":"file:///corpus/alpha.txt","canonical_form":"file-text-v1","hash_version":"sha256"},
+   "title":"Alpha doc"},
+  {"citation_key":"rec-bbb","hash":"2222222222222222222222222222222222222222222222222222222222222222",
+   "locator":{"kind":"sql_row","uri":"pg://orders/42","canonical_form":"sql-row-text-v1","hash_version":"sha256"},
+   "title":"Order 42"}
+]}
+JSON
+  export CURL_BODY_FILE="$CASE/pointer.json"
+}
+
+# ── OFF state, tested SPECIFICALLY (MOL-5857's rule) ─────────────────────────
+# A suite that only exercises the ON path passes whether or not the opt-in is
+# honoured. These two pin that pointer mode changes NOTHING until asked for.
+
+# supply mode on, pointer opt-in UNSET ⇒ still asks for facts
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+ground_body
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-OFF","cwd":"/tmp"}'
+if grep -q '"mode":"facts"' "$CURL_LOG" && ! grep -q '"mode":"pointer"' "$CURL_LOG"; then
+  pass "pointer: opt-in unset ⇒ body still requests facts mode"
+else
+  fail "pointer: opt-in unset ⇒ body still requests facts mode" "log='$(cat "$CURL_LOG")'"
+fi
+
+# explicit off
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=0
+ground_body
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-OFF2","cwd":"/tmp"}'
+if grep -q '"mode":"facts"' "$CURL_LOG" && ! grep -q '"mode":"pointer"' "$CURL_LOG"; then
+  pass "pointer: MOLLOW_SUPPLY_POINTER_MODE=0 ⇒ facts mode"
+else
+  fail "pointer: MOLLOW_SUPPLY_POINTER_MODE=0 ⇒ facts mode" "log='$(cat "$CURL_LOG")'"
+fi
+
+# pointer opt-in ON but supply mode OFF ⇒ no curl at all. The outer guard still
+# wins; pointer mode must not be a second way to switch the hook on.
+reset_case
+export MOLLOW_SUPPLY_POINTER_MODE=on
+unset MOLLOW_SUPPLY_MODE
+ground_body
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-OFF3","cwd":"/tmp"}'
+if [ "$LAST_RC" -eq 0 ] && [ -z "$LAST_OUT" ] && ! curl_called; then
+  pass "pointer: pointer opt-in alone ⇒ no curl (outer guard still wins)"
+else
+  fail "pointer: pointer opt-in alone ⇒ no curl" "rc=$LAST_RC out='$LAST_OUT' log='$(cat "$CURL_LOG")'"
+fi
+
+# ── ON state ─────────────────────────────────────────────────────────────────
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+pointer_body
+run_hook "supply-ground.sh" '{"prompt":"what is in the corpus","session_id":"sess-PTR","cwd":"/tmp"}'
+
+if grep -q '"mode":"pointer"' "$CURL_LOG"; then
+  pass "pointer: on ⇒ body requests pointer mode"
+else
+  fail "pointer: on ⇒ body requests pointer mode" "log='$(cat "$CURL_LOG")'"
+fi
+
+CTX="$(printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext // ""' 2>/dev/null)"
+
+# §8: "the prompt names the tool" is the only remedy for the model not fetching.
+# All three names, spelled as the model sees them.
+missing=""
+for t in "mcp__fetch-files__fetch_file" "mcp__fetch-postgres__execute_sql" "mcp__mollow-memory__verify_fetched_bytes"; do
+  printf '%s' "$CTX" | grep -qF "$t" || missing="$missing $t"
+done
+if [ -z "$missing" ]; then
+  pass "pointer: injected context names all three tools by their real names"
+else
+  fail "pointer: injected context names all three tools" "missing:$missing ctx='$CTX'"
+fi
+
+# No content crosses. The fixture carries none, so this asserts the WORDING does
+# not invent any — and that the facts-mode phrasing is not reused.
+if ! printf '%s' "$CTX" | grep -qiF "Facts from your memory"; then
+  pass "pointer: does not reuse the facts-mode wording"
+else
+  fail "pointer: does not reuse the facts-mode wording" "ctx='$CTX'"
+fi
+
+# THE PAIRING TEST. Each entry's uri must appear on the SAME line as its OWN
+# hash. Pairing entry A's hash with entry B's uri is the failure that reports a
+# mismatch which is not real, and it is invisible if uris and hashes are only
+# checked for presence.
+a_ok="$(printf '%s' "$CTX" | grep -c 'uri=file:///corpus/alpha.txt hash=1111' || true)"
+b_ok="$(printf '%s' "$CTX" | grep -c 'uri=pg://orders/42 hash=2222' || true)"
+if [ "$a_ok" -eq 1 ] && [ "$b_ok" -eq 1 ]; then
+  pass "pointer: each entry pairs its OWN uri with its OWN hash on one line"
+else
+  fail "pointer: uri/hash pairing" "alpha=$a_ok order=$b_ok ctx='$CTX'"
+fi
+
+# Locator kind is named per entry, so the model can pick the right fetch tool.
+if printf '%s' "$CTX" | grep -qF "[file]" && printf '%s' "$CTX" | grep -qF "[sql_row]"; then
+  pass "pointer: names each locator's kind so the fetch tool can be chosen"
+else
+  fail "pointer: names each locator's kind" "ctx='$CTX'"
+fi
+
+# Receipt: citation_key is the registry record id, match_text is the uri (Mollow
+# holds no content to match against).
+PR="$(find "$TMPDIR" -name 'g-ptr-1.json' 2>/dev/null | head -1)"
+if [ -n "$PR" ] \
+  && [ "$(jq -r '.mode' "$PR")" = "pointer" ] \
+  && [ "$(jq -r '[.facts[].citation_key] | sort | join(",")' "$PR")" = "rec-aaa,rec-bbb" ] \
+  && [ "$(jq -r '[.facts[].match_text] | sort | join(",")' "$PR")" = "file:///corpus/alpha.txt,pg://orders/42" ]; then
+  pass "pointer: receipt carries citation_key + the locator uri as match_text"
+else
+  fail "pointer: receipt shape" "receipt='$(cat "$PR" 2>/dev/null)'"
+fi
+
+# ── Stop: credit on the VERIFY call, bounded to this turn ────────────────────
+# Evidence is the entry hash reaching a tool input, not the uri and not the prose.
+# GRD is a grounded_at just in the past so a "now" tool call is inside the turn.
+GRD=$(( $(date +%s) - 30 ))
+
+ptr_receipt() {  # $1=dir $2=gid $3..: citation_key:hash pairs
+  local dir="$1" gid="$2"; shift 2
+  local facts="[]"
+  for pair in "$@"; do
+    facts="$(jq -c --argjson f "$facts" --arg k "${pair%%:*}" --arg h "${pair#*:}" \
+      '$f + [{citation_key:$k, match_text:("file:///c/"+$k+".txt"), verify_hash:$h, relevance:0.9}]' <<<'null')"
+  done
+  jq -cn --arg g "$gid" --argjson ts "$GRD" --argjson f "$facts" \
+    '{grounding_id:$g, grounded_at:$ts, mode:"pointer", facts:$f}' >"$dir/$gid.json"
+}
+
+# Verifying entry A credits A and leaves B alone.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-PS"; mkdir -p "$rdir"
+ptr_receipt "$rdir" "g-ptr-9" "rec-aaa:HASH_A" "rec-bbb:HASH_B"
+tp="$CASE/t.jsonl"; ptr_transcript "$tp" "HASH_A" "Checked the first one."
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-PS\",\"transcript_path\":\"$tp\",\"stop_hook_active\":false}"
+if grep -q "rec-aaa" "$CURL_LOG" && ! grep -q "rec-bbb" "$CURL_LOG"; then
+  pass "pointer stop: credits the VERIFIED entry, not the one left alone"
+else
+  fail "pointer stop: credits only the verified entry" "log='$(cat "$CURL_LOG")'"
+fi
+
+# A sql_row entry is credited too — the whole point of keying on the hash rather
+# than the uri, since execute_sql never receives the pg:// locator.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-SQL"; mkdir -p "$rdir"
+jq -cn --argjson ts "$GRD" '{grounding_id:"g-sql-1",grounded_at:$ts,mode:"pointer",facts:[
+  {citation_key:"rec-sql",match_text:"pg://orders/42",verify_hash:"HASH_SQL",relevance:0.9}]}' >"$rdir/g-sql-1.json"
+tpq="$CASE/tq.jsonl"; ptr_transcript "$tpq" "HASH_SQL" "Read the row and checked it."
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-SQL\",\"transcript_path\":\"$tpq\",\"stop_hook_active\":false}"
+if grep -q "rec-sql" "$CURL_LOG"; then
+  pass "pointer stop: a sql_row entry IS credited (uri never reaches execute_sql)"
+else
+  fail "pointer stop: sql_row must be creditable by hash" "log='$(cat "$CURL_LOG")'"
+fi
+
+# A verify from BEFORE this grounding must not credit it — the tail spans turns.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-OLD"; mkdir -p "$rdir"
+ptr_receipt "$rdir" "g-ptr-2" "rec-old:HASH_OLD"
+tpo="$CASE/to.jsonl"
+ptr_transcript "$tpo" "HASH_OLD" "Checked it last turn." "2020-01-01T00:00:00.000Z"
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-OLD\",\"transcript_path\":\"$tpo\",\"stop_hook_active\":false}"
+if grep -q "g-ptr-2" "$CURL_LOG" && ! grep -q "rec-old" "$CURL_LOG"; then
+  pass "pointer stop: a verify from an EARLIER turn does not credit this one"
+else
+  fail "pointer stop: out-of-turn verify must not credit" "log='$(cat "$CURL_LOG")'"
+fi
+
+# No tool call at all ⇒ omit used_fact_ids rather than send an empty list.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-PN"; mkdir -p "$rdir"
+ptr_receipt "$rdir" "g-ptr-8" "rec-none:HASH_N"
+tp2="$CASE/t2.jsonl"; ptr_transcript "$tp2" "" "I did not open anything."
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-PN\",\"transcript_path\":\"$tp2\",\"stop_hook_active\":false}"
+if grep -q "g-ptr-8" "$CURL_LOG" && ! grep -q "used_fact_ids" "$CURL_LOG"; then
+  pass "pointer stop: nothing verified ⇒ posts back WITHOUT used_fact_ids"
+else
+  fail "pointer stop: nothing verified ⇒ omits used_fact_ids" "log='$(cat "$CURL_LOG")'"
+fi
+
+# THE FINDING: the wording asks the model to NAME entries it skipped. Naming one
+# in prose — no fetch, no verify — must not credit it.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-SKIP"; mkdir -p "$rdir"
+jq -cn --argjson ts "$GRD" '{grounding_id:"g-ptr-3",grounded_at:$ts,mode:"pointer",facts:[
+  {citation_key:"rec-skipped",match_text:"pg://orders/42",verify_hash:"HASH_SK",relevance:0.9}]}' >"$rdir/g-ptr-3.json"
+tps="$CASE/ts.jsonl"
+ptr_transcript "$tps" "" "I skipped pg://orders/42 and HASH_SK because execute_sql is unavailable."
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-SKIP\",\"transcript_path\":\"$tps\",\"stop_hook_active\":false}"
+if grep -q "g-ptr-3" "$CURL_LOG" && ! grep -q "rec-skipped" "$CURL_LOG"; then
+  pass "pointer stop: an entry NAMED as skipped in prose is not credited"
+else
+  fail "pointer stop: naming a skipped entry must not credit it" "log='$(cat "$CURL_LOG")'"
+fi
+
+# A pointer entry whose locator uri is EMPTY must still be credited when its hash
+# verifies. The uri stopped being the evidence; leaving it in the shared
+# emptiness guard silently refused an entry that was fetched and checked.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-NOURI"; mkdir -p "$rdir"
+jq -cn --argjson ts "$GRD" '{grounding_id:"g-nouri",grounded_at:$ts,mode:"pointer",facts:[
+  {citation_key:"rec-nouri",match_text:"",verify_hash:"HASH_NU",relevance:0.9}]}' >"$rdir/g-nouri.json"
+tnu="$CASE/tnu.jsonl"; ptr_transcript "$tnu" "HASH_NU" "Checked it."
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-NOURI\",\"transcript_path\":\"$tnu\",\"stop_hook_active\":false}"
+if grep -q "rec-nouri" "$CURL_LOG"; then
+  pass "pointer stop: an empty uri does not disqualify a verified entry"
+else
+  fail "pointer stop: empty uri must not block a verified credit" "log='$(cat "$CURL_LOG")'"
+fi
+
+# Greptile #6228 round 5, finding 1: a verify that came back MISMATCH still has
+# the hash in its INPUT. Reading inputs alone credited a pointer the check
+# REFUTED — a receipt showing every pointer used while every verification failed.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-MM"; mkdir -p "$rdir"
+ptr_receipt "$rdir" "g-mm-1" "rec-mm:HASH_MM"
+tmm="$CASE/tmm.jsonl"; ptr_transcript "$tmm" "HASH_MM" "The bytes differ." "" "mismatch"
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-MM\",\"transcript_path\":\"$tmm\",\"stop_hook_active\":false}"
+if grep -q "g-mm-1" "$CURL_LOG" && ! grep -q "rec-mm" "$CURL_LOG"; then
+  pass "pointer stop: a verify returning MISMATCH does not credit the pointer"
+else
+  fail "pointer stop: mismatch must not credit" "log='$(cat "$CURL_LOG")'"
+fi
+
+# Finding 2, and it is p9's lesson one layer out: two pointer records with
+# IDENTICAL bytes at DIFFERENT locators legitimately share a hash and keep
+# separate citation keys. Verifying one must not credit both — that is the exact
+# collapse p9 changed the schema to prevent. A one-pointer fixture cannot express
+# it, so this carries two.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-DUP"; mkdir -p "$rdir"
+jq -cn --argjson ts "$GRD" '{grounding_id:"g-dup-1",grounded_at:$ts,mode:"pointer",facts:[
+  {citation_key:"rec-one",match_text:"file:///c/one.txt",verify_hash:"HASH_SHARED",relevance:0.9},
+  {citation_key:"rec-two",match_text:"file:///c/two.txt",verify_hash:"HASH_SHARED",relevance:0.8}]}' >"$rdir/g-dup-1.json"
+tdp="$CASE/tdp.jsonl"; ptr_transcript "$tdp" "HASH_SHARED" "Checked one of them."
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-DUP\",\"transcript_path\":\"$tdp\",\"stop_hook_active\":false}"
+if grep -q "g-dup-1" "$CURL_LOG" && ! grep -q "rec-one" "$CURL_LOG" && ! grep -q "rec-two" "$CURL_LOG"; then
+  pass "pointer stop: a hash shared by two entries credits NEITHER (unattributable)"
+else
+  fail "pointer stop: shared hash must credit neither" "log='$(cat "$CURL_LOG")'"
+fi
+
+# Greptile #6228 round 6: a tool_result's `content` arrives BOTH as a string and
+# as an array of text blocks, in the SAME transcript. Every earlier fixture used
+# the string shape, so none of them could express this.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-ARR"; mkdir -p "$rdir"
+ptr_receipt "$rdir" "g-arr-1" "rec-arr:HASH_ARR"
+tar="$CASE/tar.jsonl"; ptr_transcript "$tar" "HASH_ARR" "Checked it." "" "match" "array"
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-ARR\",\"transcript_path\":\"$tar\",\"stop_hook_active\":false}"
+if grep -q "rec-arr" "$CURL_LOG"; then
+  pass "pointer stop: an ARRAY-shaped tool_result still credits the verified entry"
+else
+  fail "pointer stop: array-shaped result must credit" "log='$(cat "$CURL_LOG")'"
+fi
+
+# The extraction must not have become "any array result counts": a mismatch in
+# array shape must still be refused.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-ARRM"; mkdir -p "$rdir"
+ptr_receipt "$rdir" "g-arr-2" "rec-arrm:HASH_ARRM"
+tam="$CASE/tam.jsonl"; ptr_transcript "$tam" "HASH_ARRM" "Differs." "" "mismatch" "array"
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-ARRM\",\"transcript_path\":\"$tam\",\"stop_hook_active\":false}"
+if grep -q "g-arr-2" "$CURL_LOG" && ! grep -q "rec-arrm" "$CURL_LOG"; then
+  pass "pointer stop: an ARRAY-shaped MISMATCH still does not credit"
+else
+  fail "pointer stop: array-shaped mismatch must not credit" "log='$(cat "$CURL_LOG")'"
 fi
 
 echo

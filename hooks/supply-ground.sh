@@ -18,6 +18,25 @@
 # because the 2s budget is spent whether or not the server answers, and the
 # server-side `supply_mode` flag only 404s AFTER the request is made.
 #
+#
+# ── The wording and the matcher are ONE mechanism ────────────────────────────
+# Changing the injected text in supply-ground.sh changes what appears in the
+# transcript, which changes what supply-stop.sh can see. They move together or
+# one of them is briefly wrong.
+#
+# That is not theoretical. MOL-5936 p6 took FIVE review rounds and every round
+# found a real defect in the previous round's fix, always across this seam:
+#
+#   name only reachable tools  ->  "say so and stop" ended the turn
+#   "skip, don't stop"         ->  "NAME what you skipped" made a skipped entry
+#                                  creditable, because naming was the evidence
+#   credit on the fetch        ->  sql_row uncreditable; a failed fetch credited
+#   credit on the hash         ->  a failed verify credited; a shared hash
+#                                  credited both records
+#
+# Before changing either file, ask what the other now sees. In particular: any
+# instruction that asks the model to MENTION something is a change to the
+# matcher's input.
 # Fail-open, silently: every path exits 0. A miss, a timeout, a malformed
 # response — the turn proceeds ungrounded and nothing is surfaced.
 
@@ -39,11 +58,22 @@ prompt="$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null || true)"
 session_id="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
 [ -z "$prompt" ] && exit 0
 
-# facts mode only: Claude Code composes the request itself and will not accept a
-# prompt-mode body it did not build. Limit is server-capped; keep it small to
-# respect the per-turn budget and the injected context size.
+# Never prompt mode: Claude Code composes the request itself and will not accept a
+# prompt-mode body it did not build. So this asks for `facts` (content inline) or,
+# behind its own opt-in, `pointer` (hash + locator, NO content — the model reads
+# the bytes itself off the user's own disk or database).
+#
+# The two are different enough downstream that the mode is carried in a variable
+# rather than re-derived: the wire shape, the dedupe key, the injected wording and
+# the receipt all branch on it, and re-reading the env var at each of those points
+# is how they drift apart.
+mode="facts"
+mm_supply_pointer_enabled && mode="pointer"
+
+# Limit is server-capped; keep it small to respect the per-turn budget and the
+# injected context size.
 limit="${MOLLOW_SUPPLY_LIMIT:-5}"
-body="$(jq -cn --arg q "$prompt" --argjson n "$limit" '{mode: "facts", query: $q, limit: $n}' 2>/dev/null || true)"
+body="$(jq -cn --arg m "$mode" --arg q "$prompt" --argjson n "$limit" '{mode: $m, query: $q, limit: $n}' 2>/dev/null || true)"
 [ -z "$body" ] && exit 0
 
 # Hard 2s cap (harder than anything relay mode faces). A miss drops the grounding
@@ -71,9 +101,20 @@ if [ -f "$seen_file" ]; then
   seen_ids="$(jq -c --arg k "$seen_key" '.[$k] // []' "$seen_file" 2>/dev/null || echo '[]')"
 fi
 
+# The dedupe key is the wire's own citation identifier, which DIFFERS by mode:
+# `message_hash` for a facts-mode fact (a digest over its content) and
+# `citation_key` for a pointer fact (the registry record id). Both are stable per
+# citeable fact and both are what the post-back cites, which is the property that
+# matters — keying on anything else would suppress the wrong thing and cite the
+# wrong thing. Neither is a row id.
+#
+# `citation_key` is read FIRST so a pointer fact is never keyed by a stray
+# `message_hash`: a pointer fact carries none today, and if one ever appeared it
+# would be the etch digest of a fact whose content Mollow does not hold.
 fresh="$(printf '%s' "$resp" | jq -c --argjson seen "$seen_ids" '
   [ .facts[]?
-    | select((.message_hash // "") as $h | $h != "" and (($seen | index($h)) | not)) ]
+    | select(((.citation_key // .message_hash) // "") as $h
+             | $h != "" and (($seen | index($h)) | not)) ]
   ' 2>/dev/null || echo '[]')"
 
 fresh_count="$(printf '%s' "$fresh" | jq 'length' 2>/dev/null || echo 0)"
@@ -82,10 +123,74 @@ fresh_count="$(printf '%s' "$fresh" | jq 'length' 2>/dev/null || echo 0)"
 # no receipt, no post-back. Keeps the measurement honest (supplied = injected).
 [ "$fresh_count" -gt 0 ] || exit 0
 
-ctx="$(printf '%s' "$fresh" | jq -r '
-  "Facts from your memory that may bear on this request (surfaced by Mollow supply mode — use them if they apply, otherwise ignore):\n"
-  + ([ .[] | "- " + (.title // "fact") + ": " + (.content // "") ] | join("\n"))
-  ' 2>/dev/null || true)"
+# ── The injected wording IS the deliverable in pointer mode ──────────────────
+# plan-hash-pointer-demo.md §8 lists "model does not call the fetch tool" as a
+# rehearsal failure whose only remedy is "the prompt names the tool". So these
+# tool names are load-bearing text, not packaging, and each is spelled as the
+# model actually sees it:
+#
+#   mcp__fetch-files__fetch_file            host_agent/lib/host_agent/mcp/fetch_files.ex
+#   mcp__fetch-postgres__execute_sql        postgres-mcp 0.3.0, restricted mode
+#   mcp__mollow-memory__verify_fetched_bytes  webapp/lib/mollow/mcp/pointer_tools.ex
+#
+# Each entry pairs its OWN uri with its OWN hash on one line. Listing uris and
+# hashes as two collections invites pairing entry A's hash with entry B's bytes,
+# which reports a mismatch that is not real — the worst possible output here,
+# because it reads as "the content was altered" about content that was not.
+#
+# `verify_fetched_bytes` is named with hash + bytes ONLY. It takes no canonical
+# form on main today; naming a parameter the tool does not accept would make this
+# prose read correct about a weaker implementation, which is the partial-mirror
+# failure MOL-5948 was. When the disambiguator (MOL-5912 p11) lands, the form is
+# added here AND to the entry lines together, or not at all.
+if [ "$mode" = "pointer" ]; then
+  # Only the kinds actually present are named. Naming a fetch tool for a kind not
+  # in this response is at best noise and at worst an instruction to call a server
+  # the session does not have: resolve-mcp-host.sh DROPS fetch-files when the
+  # corpus root is unset or not a real directory, and fetch-postgres without a DSN
+  # (Greptile, #6228). The absence line turns an unusable instruction into a
+  # diagnosable one rather than leaving the model to improvise a fetch.
+  #
+  # It says SKIP, not stop. A mixed response plus one missing tool would otherwise
+  # discard the pointers the session CAN fetch and lose the grounding for the whole
+  # turn — a worse outcome than the partial one, and a regression this hook
+  # introduced while fixing the tool-naming finding above it.
+  #
+  # `plan-hash-pointer-demo.md` §5 makes two sources deliberate partly so a wedged
+  # Postgres MCP "does not end the demo". Stop-the-turn converted a missing tool
+  # into exactly that. And the mixed case is the DEFAULT, not an edge: the p7
+  # rehearsal measured resolve-mcp-host.sh dropping fetch-postgres outright when
+  # POINTER_FETCH_PG_URL is unset, so one-tool-present is the state of any session
+  # whose operator exported one env var and not the other.
+  #
+  # It also has to NAME what it skipped. A silent skip plus a partial answer is the
+  # same shape as a citation count that looks like use: the turn appears to have
+  # worked while quietly grounding on less than it was handed.
+  ctx="$(printf '%s' "$fresh" | jq -r '
+    ([ .[] | (.locator.kind) // "unknown" ] | unique) as $kinds
+    | "Mollow supply mode handed you POINTERS, not content. Each entry names where the content lives and the digest it was registered under. Mollow keeps no copy — read the bytes yourself, then check them. Use what applies; ignore the rest.\n\n"
+    + "For each entry you use:\n"
+    + "1. FETCH it. "
+    + ( ( (if ($kinds | index("file")) then ["A `file` locator: call mcp__fetch-files__fetch_file with that entry'"'"'s uri."] else [] end)
+        + (if ($kinds | index("sql_row")) then ["A `sql_row` locator: call mcp__fetch-postgres__execute_sql."] else [] end)
+        ) | join(" ") )
+    + " If a tool named here is not available in this session, skip ONLY the entries needing that tool and keep going with the ones you can fetch. NAME the entries you skipped and why, in your answer: an entry you cannot fetch is one you cannot check, and an unchecked pointer is retrieval with extra latency. A silent skip makes a partial answer look like a complete one.\n"
+    + "2. CHECK it. Call mcp__mollow-memory__verify_fetched_bytes with that same entry'"'"'s hash and the bytes exactly as they came back — do not trim, re-indent or re-encode them.\n"
+    + "Keep the hash and the bytes from the SAME entry. Pairing one entry'"'"'s hash with another'"'"'s bytes reports a mismatch that is not real.\n\n"
+    + "Entries:\n"
+    + ([ .[]
+         | "- " + (.title // "entry")
+           + " [" + ((.locator.kind) // "unknown") + "]"
+           + " uri=" + ((.locator.uri) // "")
+           + " hash=" + ((.hash) // "")
+       ] | join("\n"))
+    ' 2>/dev/null || true)"
+else
+  ctx="$(printf '%s' "$fresh" | jq -r '
+    "Facts from your memory that may bear on this request (surfaced by Mollow supply mode — use them if they apply, otherwise ignore):\n"
+    + ([ .[] | "- " + (.title // "fact") + ": " + (.content // "") ] | join("\n"))
+    ' 2>/dev/null || true)"
+fi
 
 mm_emit_context "UserPromptSubmit" "$ctx"
 
@@ -106,10 +211,27 @@ mm_emit_context "UserPromptSubmit" "$ctx"
 if mm_safe_component "$session_id" && mm_safe_component "$grounding_id"; then
   receipt_root="${TMPDIR:-/tmp}/mollow-supply"
   receipt_dir="${receipt_root}/${session_id}"
+  # The receipt is normalised to ONE shape across both modes, so supply-stop.sh
+  # has a single matcher rather than two that can drift:
+  #
+  #   citation_key  what the post-back sends (message_hash | citation_key)
+  #   match_text    what the answer is matched against LOCALLY
+  #
+  # In facts mode `match_text` is the fact's content, as before. In pointer mode
+  # Mollow never held the content — the model fetched it — so there is nothing to
+  # match verbatim; the locator uri is used instead. It is weaker evidence and the
+  # matcher treats it as such (see supply-stop.sh). `mode` is recorded so the Stop
+  # hook does not have to infer which kind it is holding.
   receipt="$(printf '%s' "$fresh" | jq -c \
-    --arg gid "$grounding_id" --argjson ts "$(date +%s)" '
-    { grounding_id: $gid, grounded_at: $ts,
-      facts: [ .[] | {message_hash, content, relevance} ] }' 2>/dev/null || true)"
+    --arg gid "$grounding_id" --arg mode "$mode" --argjson ts "$(date +%s)" '
+    { grounding_id: $gid, grounded_at: $ts, mode: $mode,
+      facts: [ .[]
+               | { citation_key: (.citation_key // .message_hash),
+                   match_text: (if (.citation_key // null) != null
+                                then ((.locator.uri) // "")
+                                else (.content // "") end),
+                   verify_hash: (.hash // null),
+                   relevance: (.relevance // null) } ] }' 2>/dev/null || true)"
   if [ -n "$receipt" ]; then
     (
       umask 077
@@ -130,7 +252,9 @@ fi
 # Record what was shown so the next turn suppresses it. Best-effort and last: a
 # failure here must never cost the turn its context. See mm_seen_add in
 # _common.sh for the lock and retry budget.
-shown="$(printf '%s' "$fresh" | jq -c '[ .[].message_hash // empty ]' 2>/dev/null || echo '[]')"
+# Same key the freshness filter used, or the next turn re-injects what it just
+# showed. `citation_key` first, for the reason stated at the filter above.
+shown="$(printf '%s' "$fresh" | jq -c '[ .[] | (.citation_key // .message_hash) // empty ]' 2>/dev/null || echo '[]')"
 if [ "$shown" != "[]" ]; then
   mm_seen_add "$seen_file" "$seen_key" "$shown" || true
 fi

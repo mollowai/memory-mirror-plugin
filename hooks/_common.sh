@@ -103,6 +103,24 @@ mm_supply_enabled() {
   esac
 }
 
+# True when pointer mode is opted in for this machine. A SECOND opt-in on top of
+# mm_supply_enabled, mirroring the server's own split: `supply_mode` gates whether
+# the endpoint answers at all, `pointer_mode` gates whether "pointer" is even in
+# the mode vocabulary. Off here means the hooks keep asking for `facts` exactly as
+# before, so turning pointer mode on server-side changes nothing on this machine
+# until this is set too.
+#
+# Both guards are read before stdin and before any curl, for the same reason
+# mm_supply_enabled is: the 2s budget is spent whether or not the server answers.
+mm_supply_pointer_enabled() {
+  local v
+  v="$(printf '%s' "${MOLLOW_SUPPLY_POINTER_MODE:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$v" in
+    1 | true | yes | on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # True when $1 is safe to use as a single filesystem path component: non-empty,
 # only [A-Za-z0-9._-], and neither `.`/`..` nor containing a `..` sequence. The
 # supply hooks build receipt paths from `session_id` and `grounding_id`; a bare

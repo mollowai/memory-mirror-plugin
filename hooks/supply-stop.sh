@@ -15,6 +15,25 @@
 # faked).
 #
 # ── Blast radius / posture ───────────────────────────────────────────────────
+#
+# ── The wording and the matcher are ONE mechanism ────────────────────────────
+# Changing the injected text in supply-ground.sh changes what appears in the
+# transcript, which changes what supply-stop.sh can see. They move together or
+# one of them is briefly wrong.
+#
+# That is not theoretical. MOL-5936 p6 took FIVE review rounds and every round
+# found a real defect in the previous round's fix, always across this seam:
+#
+#   name only reachable tools  ->  "say so and stop" ended the turn
+#   "skip, don't stop"         ->  "NAME what you skipped" made a skipped entry
+#                                  creditable, because naming was the evidence
+#   credit on the fetch        ->  sql_row uncreditable; a failed fetch credited
+#   credit on the hash         ->  a failed verify credited; a shared hash
+#                                  credited both records
+#
+# Before changing either file, ask what the other now sees. In particular: any
+# instruction that asks the model to MENTION something is a change to the
+# matcher's input.
 # Loads into every Claude Code session. Opt-in guard first; fail-open, silent;
 # exits 0 on every path.
 #
@@ -96,16 +115,84 @@ fi
 # answer — strong evidence of actual use, and it never fires on paraphrase, so it
 # undercounts rather than over-claims. Short facts (<8 words) must appear whole.
 # Emits the message_hash list. Output "[]" on any trouble.
+# In POINTER mode the evidence is necessarily weaker, and the reason is structural
+# rather than a shortcut: Mollow never held the content. The model fetched the
+# bytes itself, so there is no stored text to find an 8-word run of, and the only
+# thing both sides know is the locator uri. So a pointer fact counts as cited when
+# its uri appears in the answer.
+#
+# That is a real signal — a uri is distinctive enough that incidental occurrence is
+# unlikely — but it is weaker than the content run in one specific way worth
+# naming: the uri was PUT IN FRONT OF THE MODEL by this hook's own injected
+# context, so a model that echoes the pointer list without fetching anything would
+# match. It over-counts in that direction where the content matcher under-counts.
+# Recorded here rather than silently, because `supplied_used_count` means slightly
+# different things in the two modes and a reader comparing them should know.
+#
+# AND THE SERVER CANNOT CORRECT ANY OF THIS. `Outcome.do_record!/2` is
+# `used = Enum.uniq(params.used_fact_ids)` followed by a MapSet membership test
+# against what was supplied (outcome.ex:105-107 on main) — there is no text
+# matching server-side at all. So it catches a PHANTOM key (an id never supplied)
+# and nothing else: every key in this array is taken verbatim as "the model used
+# this". Posting the whole supplied list having fetched nothing yields
+# supplied_used_count == N, phantom_used_count == 0 and a stored receipt that
+# looks perfect and establishes nothing — measured by the p7 rehearsal.
+#
+# Which makes THIS function the only thing standing between an honest count and a
+# flattering one. That is why it is conservative in facts mode and why the uri is
+# matched whole here, and why the count must never be read as evidence that bytes
+# were fetched: that evidence is the fetch tool call and verify_fetched_bytes
+# returning `match`, neither of which this hook can see.
+#
+# The uri is matched WHOLE, not as an 8-word run: a path chopped into word runs
+# matches any sibling path sharing a prefix, which is most of a corpus.
 match_used() {
-  local receipt="$1" ans="$2"
-  printf '%s' "$receipt" | jq -c --arg answer "$ans" '
+  local receipt="$1" ans="$2" tools="${3:-}"
+  printf '%s' "$receipt" | jq -c --arg answer "$ans" --arg tools "$tools" '
     def norm: ascii_downcase | gsub("[^a-z0-9]+"; " ") | ltrimstr(" ") | rtrimstr(" ");
     ($answer | norm) as $a
+    | (.mode // "facts") as $mode
+    # How many entries carry each hash. Two pointer records with identical bytes
+    # at different locators legitimately SHARE one hash and keep separate citation
+    # keys — that case is exactly why p9 keys membership on the record id. Keying
+    # the matcher on the hash collapsed them again: verifying one credited both
+    # (Greptile, #6228). An ambiguous hash credits NEITHER, because the transcript
+    # cannot say which record the model actually read.
+    | ( reduce (.facts[]? | .verify_hash // "") as $h ({}; .[$h] = ((.[$h] // 0) + 1)) ) as $hcount
     | [ .facts[]?
-        | .message_hash as $mh
-        | ((.content // "") | norm | split(" ") | map(select(length > 0))) as $w
+        | .citation_key as $mh
+        | (.match_text // "") as $raw
+        | (.verify_hash // "") as $vh
+        | ($raw | norm) as $t
+        | ($t | split(" ") | map(select(length > 0))) as $w
         | ($w | length) as $n
-        | if ($mh == null) or ($n == 0) then empty
+        | if $mh == null then empty
+          elif $mode == "pointer" then
+            # NOTE the guard order. An empty `match_text` must NOT disqualify a
+            # pointer fact: its uri is not the evidence any more, and folding it
+            # into the shared `$n == 0` check silently refused to credit an entry
+            # whose hash verified. The emptiness that matters here is the HASH.
+            # The HASH of this entry in a tool input, not its uri, not the prose.
+            #
+            # Why the hash and not the uri (Greptile, #6228): the uri only appears
+            # in a FILE fetch. `mcp__fetch-postgres__execute_sql` receives SQL, not
+            # the `pg://` locator, so uri matching credited files and never rows —
+            # a blind spot for half the sources, not a small bias. The hash reaches
+            # `verify_fetched_bytes` whatever the kind.
+            #
+            # And it is STRONGER evidence than a fetch. A fetch that failed —
+            # unreadable, oversized, refused — still passes the uri to the tool, so
+            # uri matching credited fetches that returned no bytes. A verify call
+            # carrying the hash means bytes came back AND were checked, which is the
+            # only use this mechanism is trying to count. An unverified fetch is
+            # deliberately NOT credited: per plan-hash-pointer-demo.md §1 that is
+            # retrieval with extra latency, not a checked use.
+            (($vh // "") as $h
+             | if $h == "" then empty
+               elif (($hcount[$h] // 0) > 1) then empty
+               elif ($tools | contains($h)) then $mh
+               else empty end)
+          elif $n == 0 then empty
           elif $n < 8 then
             (if $a | contains($w | join(" ")) then $mh else empty end)
           else
@@ -144,15 +231,67 @@ grounded_at="$(printf '%s' "$receipt" | jq -r '.grounded_at // 0' 2>/dev/null ||
 latency_ms=$(((now - grounded_at) * 1000))
 [ "$latency_ms" -ge 0 ] || latency_ms=0
 
+# ── Tool calls of THIS turn (pointer mode's evidence) ────────────────────────
+# Bounded by `grounded_at`, because the tail spans turns: a hash verified three
+# turns ago would otherwise credit this receipt when the model did nothing this
+# turn (Greptile, #6228). Transcript timestamps are ISO with fractional seconds,
+# which `fromdateiso8601` rejects, so the fraction is stripped before parsing.
+# A line with no parseable timestamp is DROPPED rather than kept: keeping it
+# restores the unbounded behaviour on exactly the lines we cannot place.
+tool_inputs=""
+if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && [ "$grounded_at" -gt 0 ]; then
+  tool_inputs="$(tail -n 500 "$transcript_path" 2>/dev/null | jq -rs --argjson since "$grounded_at" '
+    # Every block in the window, assistant and user alike: the tool_use lives on
+    # the assistant message and its tool_result on the following user message, so
+    # a filter on assistant-only never sees an outcome.
+    [ .[]
+      | select( (((.timestamp? // "") | tostring | sub("\\.[0-9]+Z$"; "Z"))
+                 | try fromdateiso8601 catch -1) >= $since )
+      | ((.message.content // .content) // empty)
+      | if type == "array" then .[] else empty end ] as $blocks
+    # A verify whose RESULT did not come back `match` is not evidence of use: the
+    # hash is in its INPUT either way, so reading inputs alone credited a pointer
+    # the check REFUTED (Greptile, #6228). Correlated by tool_use_id.
+    #
+    # `"match"` is tested WITH its quotes on purpose. Bare `match` is a substring
+    # of `mismatch`; `"match"` is not, because the quote lands on the `s`.
+    | ( [ $blocks[] | select((.type? // "") == "tool_result")
+          | select((.is_error? // false) | not)
+          # `content` comes back BOTH ways in the same transcript — a string and
+          # an array of text blocks (measured: 33 string, 1 array in one tail).
+          # `tostring` on the array escapes the inner quotes, so testing the
+          # stringified array misses every array-shaped result and silently drops
+          # a verified pointer (Greptile, #6228).
+          | ( (.content? // "")
+              | if type == "array" then ([ .[]? | (.text? // "") ] | join("\n"))
+                else tostring end ) as $rc
+          | select($rc | contains("\"match\""))
+          | (.tool_use_id? // "") ] | map(select(. != "")) ) as $ok
+    | [ $blocks[] | select((.type? // "") == "tool_use")
+        # `.id` is bound BEFORE the index call: inside `$ok | index(.id)` the
+        # argument is evaluated against $ok, not against the block, so it yields
+        # null and nothing ever matches — silently, with an empty result.
+        | (.id? // "") as $tid
+        | select(($ok | index($tid)) != null)
+        | (.input? // {} | tostring) ] | join("\n")
+    ' 2>/dev/null || true)"
+fi
+
+# Which signal counts depends on the mode: facts mode reads the answer (the text
+# is Mollow's own, so a verbatim run is real evidence), pointer mode reads this
+# turn's tool calls (the bytes are the customer's, so only a verify call is).
+receipt_mode="$(printf '%s' "$receipt" | jq -r '.mode // "facts"' 2>/dev/null || echo facts)"
+if [ "$receipt_mode" = "pointer" ]; then evidence="$tool_inputs"; else evidence="$answer"; fi
+
 used='[]'
-if [ -n "$answer" ]; then
-  used="$(match_used "$receipt" "$answer")"
+if [ -n "$evidence" ]; then
+  used="$(match_used "$receipt" "$answer" "$tool_inputs")"
 fi
 
 # Omit used_fact_ids entirely when we have no reliable signal (unreadable
 # transcript, or nothing matched) — rather than send an empty list that reads
 # as "supplied, cited nothing" when we could not tell either way.
-if [ -n "$answer" ] && [ "$used" != "[]" ]; then
+if [ -n "$evidence" ] && [ "$used" != "[]" ]; then
   payload="$(jq -cn --arg gid "$grounding_id" --argjson lat "$latency_ms" --argjson used "$used" \
     '{grounding_id: $gid, status: "ok", latency_ms: $lat, used_fact_ids: $used}' 2>/dev/null || true)"
 else
