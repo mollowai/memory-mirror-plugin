@@ -147,6 +147,30 @@ mm_safe_component() {
 # key names its own tenant and ignores the workspace header. Same base as the
 # memory API — `mm_api_base` strips `/mcp/v2`, and `/seam/v1/...` sits at the
 # root — so this reuses the same MOLLOW_MEMORY_* config and the mm_ready guards.
+# OUTPUT CONTRACT (changed by MOL-5978): the HTTP STATUS on the first line, then
+# the response body. Use `mm_seam_split_status` / `mm_seam_split_body` to take
+# them apart rather than re-deriving the parsing at each call site.
+#
+# Before this, the function could not fail visibly. `|| true`, stderr to
+# /dev/null, no `-f` and no `%{http_code}` meant every HTTP error looked
+# identical to "nothing to ground": the caller read an empty or unparseable body,
+# exited 0, and the operator saw a turn that was not grounded. On the
+# `curl` path an unset MOLLOW_SUPPLY_WORKSPACE_ID answers `400
+# workspace_not_named`; on this path it answered nothing, every turn, forever —
+# and `note-to-mariam-hash-pointer-2026-09-24.md` tells the reader an empty
+# grounding means the wrong workspace, so the silence actively misdirects.
+#
+# The status rides the OUTPUT rather than a variable because every caller reads
+# this through command substitution — `resp="$(mm_seam_post_read …)"` — which
+# runs the function in a subshell. A global assigned inside would be discarded
+# on return, so the status would have been silently absent at exactly the call
+# site that needed it, while the source read correct.
+#
+# `000` is curl's own code for "no HTTP response happened" — timeout, DNS,
+# connection refused. Callers must treat it differently from a real 4xx: one is
+# transient, the other is configuration that will answer identically every turn.
+#
+# Fail-open is unchanged: this always returns 0 and never writes to stderr.
 mm_seam_post_read() {
   local path="$1" body="$2" timeout="${3:-2}"
   local args=(-sS --max-time "$timeout" -X POST "$(mm_api_base)$path"
@@ -154,7 +178,108 @@ mm_seam_post_read() {
     -H "Content-Type: application/json")
   [ -n "${MOLLOW_SUPPLY_WORKSPACE_ID:-}" ] &&
     args+=(-H "x-mollow-workspace-id: ${MOLLOW_SUPPLY_WORKSPACE_ID}")
-  curl "${args[@]}" -d "$body" 2>/dev/null || true
+
+  # `-w` appends the code on its own final line, so the body is everything
+  # before it. No temp file, so there is nothing to clean up on a path that must
+  # never abort.
+  local raw
+  raw="$(curl "${args[@]}" -w '\n%{http_code}' -d "$body" 2>/dev/null || true)"
+
+  # Nothing at all: curl could not run. Not an HTTP outcome.
+  if [ -z "$raw" ]; then
+    printf '000\n'
+    return 0
+  fi
+
+  local code="${raw##*$'\n'}" payload=""
+  # No newline means an empty body — `${raw%$'\n'*}` would hand back the code as
+  # the body.
+  case "$raw" in
+    *$'\n'*) payload="${raw%$'\n'*}" ;;
+  esac
+  printf '%s\n%s' "$code" "$payload"
+}
+
+# The status line from an `mm_seam_post_read` result.
+mm_seam_split_status() { printf '%s' "${1%%$'\n'*}"; }
+
+# The body from an `mm_seam_post_read` result, empty when there was none.
+mm_seam_split_body() {
+  case "${1:-}" in
+    *$'\n'*) printf '%s' "${1#*$'\n'}" ;;
+    *) printf '' ;;
+  esac
+}
+
+# A one-line, operator-readable reason for a non-200 from the grounding
+# endpoint, or empty when there is nothing worth saying (MOL-5978).
+#
+# Empty for `200` and for `000`. A `000` is a timeout or a network miss: it is
+# transient, the hook is already time-boxed at 2s, and reporting it would put a
+# line in front of the operator on every slow turn. A real HTTP code is
+# different — it is the server answering, and it will answer the same way on
+# every turn until something is changed.
+# The `error.type` an error body names, or empty. `json_error/3` renders
+# `{"error":{"type":"..."}}`, so a refusal says exactly which rule it broke —
+# which is better evidence than the status for any code that covers more than
+# one cause. Empty on a missing, malformed or typeless body, so a caller falls
+# back to the status rather than asserting a cause it does not have.
+mm_grounding_error_type() {
+  [ -n "${1:-}" ] || return 0
+  printf '%s' "$1" | jq -r '.error.type // empty' 2>/dev/null || true
+}
+
+# The codes are the ones `GroundController.refuse/2` can actually produce, plus
+# 429 from the supply rate-limit pipeline. Deliberately NOT a generic
+# authorization message: 400 and 403 are both about MOLLOW_SUPPLY_WORKSPACE_ID
+# and 404 is about the flag, the key or the header, so a hint that says "check
+# your credential" for all of them sends the operator to the wrong variable —
+# which is the whole failure this function exists to end.
+#
+# There is no 401 clause because this endpoint never returns one: its scope pipes
+# through `:api` ALONE, with no auth plug, and `GroundController` authenticates
+# inside the action and answers 404 rather than 401 so an unauthenticated prober
+# learns nothing. A 401 branch would be advice for a response that cannot arrive.
+mm_grounding_status_hint() {
+  case "${1:-}" in
+    200 | 000 | "") printf '' ;;
+    400)
+      printf 'Mollow supply mode: the grounding request was refused (400 workspace_not_named). Your key is workspace-scoped and MOLLOW_SUPPLY_WORKSPACE_ID is unset, so the request named no workspace.'
+      ;;
+    403)
+      printf 'Mollow supply mode: the grounding request was refused (403 workspace_not_yours). MOLLOW_SUPPLY_WORKSPACE_ID names a workspace this key does not own — check the workspace id, not the key.'
+      ;;
+    404)
+      printf 'Mollow supply mode: the grounding endpoint answered 404. Either supply_mode is off for your actor, the key is not valid, or the credential is in the wrong header (it reads x-mollow-api-key, not Authorization).'
+      ;;
+    422)
+      # 422 is the one status that covers several unrelated causes, so it reads
+      # the body's own `error.type` rather than guessing. Guessing was wrong:
+      # naming invalid_mode blamed pointer_mode for a blank query, and in FACTS
+      # mode invalid_mode is not reachable at all, so the guess was wrong for
+      # every 422 that path can produce (Greptile, #6251).
+      case "$(mm_grounding_error_type "${2:-}")" in
+        query_required)
+          printf 'Mollow supply mode: the grounding request was rejected (422 query_required). The prompt was empty once trimmed, so there was nothing to ground. This is not a configuration problem.'
+          ;;
+        invalid_mode)
+          printf 'Mollow supply mode: the grounding request was rejected (422 invalid_mode). pointer_mode is off for your actor, so "pointer" is not in the mode vocabulary. That is not a 404 and enabling supply_mode alone will not fix it.'
+          ;;
+        request_required)
+          printf 'Mollow supply mode: the grounding request was rejected (422 request_required). prompt mode needs a model request body to ground.'
+          ;;
+        *)
+          printf 'Mollow supply mode: the grounding request was rejected (422). Nothing was grounded this turn.'
+          ;;
+      esac
+      ;;
+    429)
+      printf 'Mollow supply mode: rate limited (429). Nothing was grounded this turn.'
+      ;;
+    *)
+      printf 'Mollow supply mode: the grounding request returned HTTP %s. Nothing was grounded this turn.' "$1"
+      ;;
+  esac
 }
 
 # POST JSON body ($2) to path ($1) with timeout ($3, default 3s). Fire-and-forget.

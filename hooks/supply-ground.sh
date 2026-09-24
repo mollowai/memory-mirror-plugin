@@ -56,7 +56,11 @@ mm_ready || exit 0
 input="$(cat)"
 prompt="$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null || true)"
 session_id="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
-[ -z "$prompt" ] && exit 0
+# Blank-once-trimmed counts as empty. `[ -z ]` alone passes a whitespace-only
+# prompt, which the server then trims and refuses with 422 query_required — so
+# the hook spent its 2s budget to be told there was nothing to ground. Caught by
+# Greptile on #6251 via the hint that misattributed that 422 to pointer_mode.
+[ -z "${prompt//[[:space:]]/}" ] && exit 0
 
 # Never prompt mode: Claude Code composes the request itself and will not accept a
 # prompt-mode body it did not build. So this asks for `facts` (content inline) or,
@@ -78,7 +82,29 @@ body="$(jq -cn --arg m "$mode" --arg q "$prompt" --argjson n "$limit" '{mode: $m
 
 # Hard 2s cap (harder than anything relay mode faces). A miss drops the grounding
 # and the turn proceeds ungrounded — empty output keeps it snappy.
-resp="$(mm_seam_post_read "/seam/v1/ground" "$body" 2)"
+raw="$(mm_seam_post_read "/seam/v1/ground" "$body" 2)"
+status="$(mm_seam_split_status "$raw")"
+resp="$(mm_seam_split_body "$raw")"
+
+# MOL-5978: a definite HTTP error is SAID, once, rather than dropped. Before
+# this, every non-200 exited 0 with no output and the operator saw a turn that
+# was not grounded — indistinguishable from an empty register, and
+# actively misleading, because the note tells the reader an empty grounding
+# means the wrong workspace.
+#
+# This fires only on a real HTTP code. A `000` (timeout, connection refused) is
+# transient and stays silent: the hook is time-boxed at 2s, and a line in front
+# of the operator on every slow turn is its own defect.
+#
+# It is emitted as additionalContext rather than written to stderr because that
+# is the only channel this hook has that reaches a person, and it exits
+# immediately after — a turn that could not ground has nothing else to say.
+hint="$(mm_grounding_status_hint "$status" "$resp")"
+if [ -n "$hint" ]; then
+  mm_emit_context "UserPromptSubmit" "$hint"
+  exit 0
+fi
+
 [ -z "$resp" ] && exit 0
 
 grounding_id="$(printf '%s' "$resp" | jq -r '.grounding_id // empty' 2>/dev/null || true)"
@@ -138,11 +164,24 @@ fresh_count="$(printf '%s' "$fresh" | jq 'length' 2>/dev/null || echo 0)"
 # which reports a mismatch that is not real — the worst possible output here,
 # because it reads as "the content was altered" about content that was not.
 #
-# `verify_fetched_bytes` is named with hash + bytes ONLY. It takes no canonical
-# form on main today; naming a parameter the tool does not accept would make this
-# prose read correct about a weaker implementation, which is the partial-mirror
-# failure MOL-5948 was. When the disambiguator (MOL-5912 p11) lands, the form is
-# added here AND to the entry lines together, or not at all.
+# `verify_fetched_bytes` is named with hash + canonical_form + bytes (MOL-5979).
+# The disambiguator this comment used to wait on landed as #6226, and #6240 then
+# rewrote the parameter's own description to lead with "Pass the `canonical_form`
+# from the same pointer you fetched" rather than calling it optional — because
+# OMITTING it is the dangerous path, not a neutral default.
+#
+# Omitted, the tool answers with the strongest outcome across every record that
+# hash resolves to, globally. So a model grounded through this hook could be told
+# `match` by a stranger's record registered under a different form while the
+# operator's own file had in fact changed — a false all-clear on the one question
+# the demo exists to answer.
+#
+# The form is added HERE AND TO THE ENTRY LINES TOGETHER, which is the coupling
+# rule at the top of this file: an instruction asking the model to mention
+# something is a change to the matcher's input. Naming the form in the wording
+# while the entries do not carry it would instruct the model to pass a value it
+# was never given — the partial-mirror failure MOL-5948 was, arriving from the
+# other direction.
 if [ "$mode" = "pointer" ]; then
   # Only the kinds actually present are named. Naming a fetch tool for a kind not
   # in this response is at best noise and at worst an instruction to call a server
@@ -175,14 +214,25 @@ if [ "$mode" = "pointer" ]; then
         + (if ($kinds | index("sql_row")) then ["A `sql_row` locator: call mcp__fetch-postgres__execute_sql."] else [] end)
         ) | join(" ") )
     + " If a tool named here is not available in this session, skip ONLY the entries needing that tool and keep going with the ones you can fetch. NAME the entries you skipped and why, in your answer: an entry you cannot fetch is one you cannot check, and an unchecked pointer is retrieval with extra latency. A silent skip makes a partial answer look like a complete one.\n"
-    + "2. CHECK it. Call mcp__mollow-memory__verify_fetched_bytes with that same entry'"'"'s hash and the bytes exactly as they came back — do not trim, re-indent or re-encode them.\n"
-    + "Keep the hash and the bytes from the SAME entry. Pairing one entry'"'"'s hash with another'"'"'s bytes reports a mismatch that is not real.\n\n"
+    + "2. CHECK it. Call mcp__mollow-memory__verify_fetched_bytes with that same entry'"'"'s hash, that same entry'"'"'s canonical_form, and the bytes exactly as they came back — do not trim, re-indent or re-encode them.\n"
+    + "Pass canonical_form every time. Leaving it out does not fail — it widens the check to every record sharing that hash anywhere, so it can report a match from a record that is not yours while your own entry does not match.\n"
+    + "Keep the hash, the canonical_form and the bytes from the SAME entry. Pairing one entry'"'"'s hash with another'"'"'s bytes reports a mismatch that is not real.\n\n"
     + "Entries:\n"
     + ([ .[]
          | "- " + (.title // "entry")
            + " [" + ((.locator.kind) // "unknown") + "]"
            + " uri=" + ((.locator.uri) // "")
            + " hash=" + ((.hash) // "")
+           # The token is OMITTED, never emitted empty, when an entry carries no
+           # form. `canonical_form=` with nothing after it reads as a value and
+           # the model passes "", which the tool refuses outright
+           # ({:error, {:unknown_canonical_form, _}}) — strictly worse than
+           # omitting the argument, which is merely wider. `list_pointers/2`
+           # excludes formless records, so this is a backstop rather than a path
+           # anything reaches today.
+           + (if ((.locator.canonical_form) // "") == ""
+              then ""
+              else " canonical_form=" + (.locator.canonical_form) end)
        ] | join("\n"))
     ' 2>/dev/null || true)"
 else

@@ -50,6 +50,16 @@ printf '%s\n' "$*" >>"${CURL_LOG:-/dev/null}"
 if [ -n "${CURL_BODY_FILE:-}" ] && [ -f "${CURL_BODY_FILE}" ]; then
   cat "${CURL_BODY_FILE}"
 fi
+# Honour -w '\n%{http_code}' (MOL-5978). The shim has to reproduce this or the
+# status the caller parses is the last line of the BODY, which would make every
+# response read as an error while the source looked correct. $CURL_STATUS lets a
+# case drive a specific code; 200 is the default so existing cases are unchanged.
+for a in "$@"; do
+  if [ "$a" = "-w" ]; then
+    printf '\n%s' "${CURL_STATUS:-200}"
+    break
+  fi
+done
 exit 0
 SHIM_EOF
 chmod +x "$SHIM/curl"
@@ -77,7 +87,11 @@ reset_case() {
   # A staging-shaped config so mm_ready passes when we want the ON path.
   export MOLLOW_MEMORY_URL="https://staging.mollow.ai/mcp/v2"
   export MOLLOW_MEMORY_API_KEY="mol_testkey"
+  # MOLLOW_SUPPLY_POINTER_MODE is unset here too. Leaving it exported let a
+  # pointer case contaminate every later facts-mode case, which made the
+  # suite order-dependent and hid the contamination behind a passing run.
   unset MOLLOW_SUPPLY_MODE MOLLOW_SUPPLY_WORKSPACE_ID MOLLOW_SUPPLY_LIMIT
+  unset MOLLOW_SUPPLY_POINTER_MODE CURL_STATUS
 }
 
 curl_called() { [ -s "$CURL_LOG" ]; }
@@ -553,6 +567,69 @@ else
   fail "pointer: names each locator's kind" "ctx='$CTX'"
 fi
 
+# ── canonical_form, as a COUPLED PAIR (MOL-5979) ─────────────────────────────
+# The rule at the top of supply-ground.sh: an instruction that asks the model to
+# MENTION something is a change to the matcher's input. The wording and the entry
+# lines have to move together, so these assert BOTH halves and then assert the
+# COUPLING itself — which is the only one of the three that can fail when the two
+# halves drift apart.
+
+if printf '%s' "$CTX" | grep -qF "canonical_form"; then
+  pass "pointer: the wording names canonical_form"
+else
+  fail "pointer: the wording names canonical_form" "ctx='$CTX'"
+fi
+
+# Each entry's form on the SAME line as its own hash, for the same reason the
+# uri/hash pairing is checked that way: the tool takes all three together and a
+# form from the wrong entry is a mismatch that is not real.
+af="$(printf '%s' "$CTX" | grep -c 'hash=1111.* canonical_form=file-text-v1' || true)"
+bf="$(printf '%s' "$CTX" | grep -c 'hash=2222.* canonical_form=sql-row-text-v1' || true)"
+if [ "$af" -eq 1 ] && [ "$bf" -eq 1 ]; then
+  pass "pointer: each entry pairs its OWN hash with its OWN canonical_form"
+else
+  fail "pointer: hash/canonical_form pairing" "alpha=$af order=$bf ctx='$CTX'"
+fi
+
+# THE COUPLING TEST. Everything above passes if the wording names the form and
+# the entries carry it. Neither can fail when one half is removed and the other
+# left — which is the defect the file's own rule exists to prevent. This asserts
+# the INVARIANT that ties them: if the instructions tell the model to pass a
+# canonical_form, then every entry line must actually supply one.
+#
+# Written over the emitted text rather than over the source, because the source
+# reads correct either way — the two halves live 40 lines apart in one jq
+# program.
+# `instructed` is measured on the INSTRUCTIONS ALONE — everything before the
+# "Entries:" heading. Grepping the whole context made this self-satisfying: the
+# entry lines themselves contain "canonical_form=", so removing the form from
+# the WORDING left `instructed=1` and the suite green. Found by running the
+# perturbation in both directions; one direction alone reds nothing.
+INSTR="$(printf '%s' "$CTX" | sed -n '1,/^Entries:/p')"
+instructed=0
+printf '%s' "$INSTR" | grep -qF "canonical_form" && instructed=1
+entry_lines="$(printf '%s' "$CTX" | grep -c '^- ' || true)"
+entries_with_form="$(printf '%s' "$CTX" | grep -c '^- .* canonical_form=[^ ]' || true)"
+if [ "$instructed" -eq 1 ] && [ "$entry_lines" -gt 0 ] && [ "$entry_lines" -eq "$entries_with_form" ]; then
+  pass "pointer: the wording and the entry lines carry canonical_form TOGETHER"
+else
+  fail "pointer: canonical_form coupling" \
+    "instructed=$instructed entries=$entry_lines with_form=$entries_with_form ctx='$CTX'"
+fi
+
+# The OTHER direction of the same coupling, as its own case. Entries carrying a
+# form the instructions never mention hands the model a value it is not told to
+# pass — and omitting canonical_form is the dangerous default (#6240), not a
+# neutral one. Asserted on the instruction text rather than on the context, for
+# the reason recorded above.
+if [ "$entries_with_form" -gt 0 ] && printf '%s' "$INSTR" | grep -qF "canonical_form"; then
+  pass "pointer: entries carrying a form are matched by wording that asks for it"
+else
+  fail "pointer: entries carry a form the wording never mentions" \
+    "with_form=$entries_with_form instr='$INSTR'"
+fi
+
+
 # Receipt: citation_key is the registry record id, match_text is the uri (Mollow
 # holds no content to match against).
 PR="$(find "$TMPDIR" -name 'g-ptr-1.json' 2>/dev/null | head -1)"
@@ -739,6 +816,186 @@ if grep -q "g-arr-2" "$CURL_LOG" && ! grep -q "rec-arrm" "$CURL_LOG"; then
   pass "pointer stop: an ARRAY-shaped MISMATCH still does not credit"
 else
   fail "pointer stop: array-shaped mismatch must not credit" "log='$(cat "$CURL_LOG")'"
+fi
+
+# ── an entry with NO form omits the token rather than emitting it empty ───────
+# `canonical_form=` with nothing after it reads as a value; the model passes ""
+# and the tool refuses it outright, which is strictly worse than omitting the
+# argument. `list_pointers/2` excludes formless records so nothing reaches this
+# today — which is exactly why it needs a fixture rather than a reader's trust.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+cat >"$CASE/pointer-noform.json" <<'JSON'
+{"grounding_id":"g-ptr-noform","mode":"pointer","facts":[
+  {"citation_key":"rec-ccc","hash":"3333333333333333333333333333333333333333333333333333333333333333",
+   "locator":{"kind":"file","uri":"file:///corpus/gamma.txt","hash_version":"sha256"},
+   "title":"Gamma doc"}
+]}
+JSON
+export CURL_BODY_FILE="$CASE/pointer-noform.json"
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-NOFORM","cwd":"/tmp"}'
+NCTX="$(printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext // ""' 2>/dev/null)"
+
+if printf '%s' "$NCTX" | grep -qF 'uri=file:///corpus/gamma.txt' \
+  && ! printf '%s' "$NCTX" | grep -qE 'canonical_form=($| )'; then
+  pass "pointer: an entry with no canonical_form omits the token, never emits it empty"
+else
+  fail "pointer: empty canonical_form token" "ctx='$NCTX'"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# supply-ground.sh — the hook SAYS something when the server refuses (MOL-5978)
+# ═══════════════════════════════════════════════════════════════════════════
+# The defect being fixed is SILENCE, so every case here asserts that something
+# was emitted and what it says. A test that only checked "exit 0" passes whether
+# or not the fix is present — that is the shape of the bug itself.
+
+# A 400 is the measured real case: MOLLOW_SUPPLY_WORKSPACE_ID unset with a
+# workspace-scoped key. The curl path shows it; this path showed nothing.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_STATUS=400
+echo '{"error":"workspace_not_named"}' >"$CASE/err.json"
+export CURL_BODY_FILE="$CASE/err.json"
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-400","cwd":"/tmp"}'
+ECTX="$(printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext // ""' 2>/dev/null)"
+if [ "$LAST_RC" -eq 0 ] && printf '%s' "$ECTX" | grep -qF "MOLLOW_SUPPLY_WORKSPACE_ID"; then
+  pass "status: a 400 names the workspace variable instead of failing silently"
+else
+  fail "status: 400 must be surfaced" "rc=$LAST_RC ctx='$ECTX' out='$LAST_OUT'"
+fi
+unset CURL_STATUS
+
+# 403 workspace_not_yours: the workspace id names someone else's workspace. The
+# hint must point at the WORKSPACE variable, not the key — Greptile caught this
+# pointing at MOLLOW_MEMORY_API_KEY, which sends the operator to troubleshoot a
+# credential that is fine. One fixture per reachable code, because the codes
+# differ in WHICH variable is wrong and that is the only useful part.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_STATUS=403
+echo '{"error":{"type":"workspace_not_yours"}}' >"$CASE/e403.json"
+export CURL_BODY_FILE="$CASE/e403.json"
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-403","cwd":"/tmp"}'
+E3="$(printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext // ""' 2>/dev/null)"
+if [ "$LAST_RC" -eq 0 ] \
+  && printf '%s' "$E3" | grep -qF "MOLLOW_SUPPLY_WORKSPACE_ID" \
+  && ! printf '%s' "$E3" | grep -qF "MOLLOW_MEMORY_API_KEY"; then
+  pass "status: a 403 points at the workspace id, NOT the key"
+else
+  fail "status: 403 must name the workspace id and not the key" "rc=$LAST_RC ctx='$E3'"
+fi
+unset CURL_STATUS
+
+# 422 covers several unrelated causes, so the hint reads the body's error.type
+# rather than guessing from the status. One fixture per type, because guessing
+# was wrong in a way a single fixture could not show: naming invalid_mode blamed
+# pointer_mode for a blank query, and in FACTS mode invalid_mode is not reachable
+# at all, so the guess was wrong for every 422 that path can produce.
+for pair in "query_required:trimmed" "invalid_mode:pointer_mode" "request_required:prompt mode"; do
+  ty="${pair%%:*}"; want="${pair#*:}"
+  reset_case
+  export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+  export CURL_STATUS=422
+  printf '{"error":{"type":"%s"}}' "$ty" >"$CASE/e422.json"
+  export CURL_BODY_FILE="$CASE/e422.json"
+  run_hook "supply-ground.sh" "{\"prompt\":\"q\",\"session_id\":\"sess-422-$ty\",\"cwd\":\"/tmp\"}"
+  E22="$(printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext // ""' 2>/dev/null)"
+  if [ "$LAST_RC" -eq 0 ] && printf '%s' "$E22" | grep -qF "$ty" && printf '%s' "$E22" | grep -qF "$want"; then
+    pass "status: a 422 $ty names its own cause, not a guessed one"
+  else
+    fail "status: 422 $ty must name its own cause" "rc=$LAST_RC want='$want' ctx='$E22'"
+  fi
+  unset CURL_STATUS
+done
+
+# The negative half: a 422 whose body names no type must NOT assert a cause.
+# Without this, "read error.type" could fall back to the old guess and pass.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_STATUS=422
+echo '{}' >"$CASE/e422x.json"
+export CURL_BODY_FILE="$CASE/e422x.json"
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-422x","cwd":"/tmp"}'
+EX="$(printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext // ""' 2>/dev/null)"
+if [ "$LAST_RC" -eq 0 ] \
+  && printf '%s' "$EX" | grep -qF "422" \
+  && ! printf '%s' "$EX" | grep -qE 'pointer_mode|query_required|request_required'; then
+  pass "status: a typeless 422 states the code and asserts no cause"
+else
+  fail "status: typeless 422 must not guess a cause" "rc=$LAST_RC ctx='$EX'"
+fi
+unset CURL_STATUS
+
+# A whitespace-only prompt never reaches the network. It passes `[ -z ]`, and the
+# server trims it and refuses — so the hook used to spend its whole 2s budget to
+# be told there was nothing to ground.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+ground_body
+run_hook "supply-ground.sh" '{"prompt":"   \t  ","session_id":"sess-blank","cwd":"/tmp"}'
+if [ "$LAST_RC" -eq 0 ] && [ -z "$LAST_OUT" ] && ! curl_called; then
+  pass "ground: a whitespace-only prompt is skipped before the request"
+else
+  fail "ground: whitespace-only prompt must not call out" \
+    "rc=$LAST_RC out='$LAST_OUT' curl='$(cat "$CURL_LOG")'"
+fi
+
+
+# A 404 is what an operator who opted in but has supply_mode off actually gets,
+# and it must not read as an empty register.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_STATUS=404
+echo '{"error":{"type":"not_found"}}' >"$CASE/e404.json"
+export CURL_BODY_FILE="$CASE/e404.json"
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-404","cwd":"/tmp"}'
+E4="$(printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext // ""' 2>/dev/null)"
+if [ "$LAST_RC" -eq 0 ] && printf '%s' "$E4" | grep -qF "supply_mode"; then
+  pass "status: a 404 names the flag/key/header causes"
+else
+  fail "status: 404 must be surfaced" "rc=$LAST_RC ctx='$E4'"
+fi
+unset CURL_STATUS
+
+# THE NEGATIVE HALF. A timeout stays silent — it is transient, the hook is capped
+# at 2s, and a line in front of the operator on every slow turn is its own
+# defect. Without this, "surface every non-200" would pass the two cases above
+# and be wrong.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_STATUS=000
+: >"$CASE/empty.json"
+export CURL_BODY_FILE="$CASE/empty.json"
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-000","cwd":"/tmp"}'
+if [ "$LAST_RC" -eq 0 ] && [ -z "$LAST_OUT" ]; then
+  pass "status: a timeout (000) stays silent rather than nagging every slow turn"
+else
+  fail "status: 000 must stay silent" "rc=$LAST_RC out='$LAST_OUT'"
+fi
+unset CURL_STATUS
+
+# And a 200 still grounds. The status plumbing sits between the request and every
+# existing behaviour, so this pins that it did not eat the happy path.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+ground_body
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-200","cwd":"/tmp"}'
+# facts mode deliberately: reset_case now unsets the pointer opt-in, so this
+# exercises the shipped default path rather than inheriting the previous case.
+if printf '%s' "$LAST_OUT" | jq -e '.hookSpecificOutput.additionalContext | test("pinned commit")' >/dev/null 2>&1; then
+  pass "status: a 200 still grounds and injects normally"
+else
+  fail "status: 200 must still ground" "out='$LAST_OUT'"
+fi
+
+# The body must survive the status line being prepended — a split that returned
+# the status as the body would make every response unparseable downstream, and
+# the receipt is where that shows.
+if printf '%s' "$LAST_OUT" | jq -e '.hookSpecificOutput.additionalContext | test("^200") | not' >/dev/null 2>&1; then
+  pass "status: the status line is stripped from the body, not injected"
+else
+  fail "status: status line leaked into the body" "out='$LAST_OUT'"
 fi
 
 echo
