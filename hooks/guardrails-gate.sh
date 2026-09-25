@@ -20,7 +20,7 @@
 #
 # Block contract (unchanged): print {decision:"block", reason} to stdout, exit 2.
 # Warn contract: print {hookSpecificOutput:{hookEventName,additionalContext}}, exit 0.
-# Bypass: `touch tmp/.skip-tdd` or SKIP_TDD=1. Fail-safe: any error => exit 0.
+# Bypass: `mkdir -p tmp && touch tmp/.skip-tdd` at the repo root, or SKIP_TDD=1. Fail-safe: any error => exit 0.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
@@ -274,7 +274,7 @@ then implement:
   ${BLOCK_REL}
 
 Refactor-only change already covered by existing tests? Bypass this edit with:
-  touch tmp/.skip-tdd"
+  mkdir -p $(printf '%q' "${REPO_ROOT}/tmp") && touch $(printf '%q' "${REPO_ROOT}/tmp/.skip-tdd")"
     if [ -n "$WARN_LINES" ]; then
       reason="${reason}
 

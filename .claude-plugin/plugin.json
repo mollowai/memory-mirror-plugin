@@ -1,7 +1,7 @@
 {
   "name": "memory-mirror",
   "description": "Cross-platform AI memory by Mollow. Remembers decisions, preferences, and work patterns across Claude Code, Claude.ai, ChatGPT, and every AI you use.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": {
     "name": "Mollow",
     "email": "hello@mollow.ai"

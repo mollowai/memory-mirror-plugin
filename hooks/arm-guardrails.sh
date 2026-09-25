@@ -100,7 +100,7 @@ if [ -n "$repo_root" ] && [ -n "$marker" ]; then
           # session has used in 14 days; a resumed session re-arms here.
           find "${HOME}/.mollow/tdd-armed" -type f -name '*.json' -mtime +14 -delete 2>/dev/null || true
           find "${HOME}/.mollow/tdd-armed" -mindepth 1 -type d -empty -delete 2>/dev/null || true
-          tdd_notice="TDD enforcement is ON for this session (your Engram preference). Write the failing test before implementation code, or the edit will be blocked. Bypass a specific edit with: touch tmp/.skip-tdd"
+          tdd_notice="TDD enforcement is ON for this session (your Engram preference). Write the failing test before implementation code, or the edit will be blocked. Bypass a specific edit with: mkdir -p $(printf '%q' "${repo_root}/tmp") && touch $(printf '%q' "${repo_root}/tmp/.skip-tdd")"
         fi
       fi
     fi
