@@ -39,6 +39,21 @@ The plugin automatically handles session lifecycle:
 - **PreCompact** — saves unsaved decisions before context compression
 - **Stop** — saves a session summary when you're done
 
+## What the plugin writes, and where
+
+The hooks read your files and add context to Claude's prompt. They write nothing into your working tree: no hook creates or changes a file or directory in your repository, so installing the plugin leaves `git status` as it was. The one exception is removal of files an earlier version left behind, described at the end of this section.
+
+What the plugin keeps on disk lives in your home directory or the system temp directory:
+
+- `~/.mollow/` — sync state (which local memory files have been sent), which advisories have already been shown, and a per-session marker at `~/.mollow/tdd-armed/<repo>/<session>.json` when your Mollow memory records a test-first preference. A marker no session has used for 14 days is deleted when a new session arms.
+- The system temp directory (`$TMPDIR`, else `/tmp`) — session sync state under `mollow-memory-sync/`, and grounding receipts under `mollow-supply/<session>/` when supply mode is on.
+
+One file in your repository changes what the plugin does, and only if you create it:
+
+- `tmp/.skip-tdd` — from the repository root, create it (`mkdir -p tmp && touch tmp/.skip-tdd`) to let edits through the test-first check. The plugin reads it and never creates or deletes it.
+
+**Earlier versions wrote into the repository.** Versions before 1.1.0 created `tmp/.tdd-armed-<session>.json`, and `tmp/` itself when it was absent. At session start the current version deletes such a file only when all of these hold: git does not track it, it is a regular file rather than a symlink, and its content is exactly the marker those versions wrote. It never follows a `tmp/` that is a symlink. It deletes `tmp/` only when it removed a marker and that left the directory empty. Your own files in `tmp/`, including `.skip-tdd`, are left alone.
+
 Claude Code's own file-based memories (`~/.claude/projects/<project>/memory/*.md` and `MEMORY.md`) become first-class Mollow memories — searchable across every AI you use — with their original kind, description, and source preserved. Re-importing an edited memory supersedes the older version.
 
 ## How it works
@@ -61,7 +76,7 @@ The plugin connects to production by default. To switch environments:
 /memory-mirror:connect production
 ```
 
-This writes a project-level `.mcp.json` override. Restart Claude Code after switching.
+This edits the plugin's own `.mcp.json` in the plugin's install directory, not a file in your project. Restart Claude Code after switching.
 
 ## Verifying & repairing local sync
 
