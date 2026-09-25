@@ -506,3 +506,26 @@ mm_project_of() {
     basename "$cwd"
   fi
 }
+
+# mm_tdd_marker <cwd> <session_id>
+#
+# Echoes the path of the per-session TDD arming marker for the repository
+# containing <cwd>, or nothing (return 1) when there is no repository or either
+# path component is unsafe. arm-guardrails.sh writes it; guardrails-gate.sh
+# tests for it. Both call this, so the two cannot disagree on the location.
+#
+# It lives under ~/.mollow, never in the repository: the plugin writes nothing
+# into the customer's working tree (MOL-6090). The previous location,
+# <repo>/tmp/.tdd-armed-<session>.json, created tmp/ in any repo without one and
+# showed up in `git status` wherever tmp/ was not ignored.
+#
+# Keyed by mm_repo_of, so a primary checkout, its worktrees and its clones share
+# one arming for a session; the repo identity's `/` become `_` so it is a single
+# directory name.
+mm_tdd_marker() {
+  local cwd="${1:-}" sid="${2:-}" repo
+  mm_safe_component "$sid" || return 1
+  repo="$(mm_repo_of "$cwd" | sed 's#[^A-Za-z0-9._-]#_#g')"
+  mm_safe_component "$repo" || return 1
+  printf '%s\n' "${HOME}/.mollow/tdd-armed/${repo}/${sid}.json"
+}

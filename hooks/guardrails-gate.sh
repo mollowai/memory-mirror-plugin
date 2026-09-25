@@ -24,7 +24,7 @@
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
-. "$DIR/_common.sh" # mm_emit_context, mm_post, mm_ready, mm_project_of; sets -uo pipefail
+. "$DIR/_common.sh" # mm_emit_context, mm_post, mm_ready, mm_project_of, mm_tdd_marker; sets -uo pipefail
 
 command -v jq >/dev/null 2>&1 || exit 0
 
@@ -84,7 +84,11 @@ tdd_would_block() {
 
   # Armed? No marker for this session => TDD off.
   [ -n "$SESSION_ID" ] || return 1
-  [ -f "${REPO_ROOT}/tmp/.tdd-armed-${SESSION_ID}.json" ] || return 1
+  local marker
+  marker="$(mm_tdd_marker "${CWD:-$PWD}" "$SESSION_ID")" || return 1
+  [ -f "$marker" ] || return 1
+  # Keep an in-use marker clear of arm-guardrails.sh's 14-day prune.
+  touch "$marker" 2>/dev/null || true
 
   # Make the target repo-relative; ignore files outside the repo.
   local rel
