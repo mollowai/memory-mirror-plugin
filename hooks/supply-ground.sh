@@ -156,8 +156,30 @@ fresh_count="$(printf '%s' "$fresh" | jq 'length' 2>/dev/null || echo 0)"
 # model actually sees it:
 #
 #   mcp__fetch-files__fetch_file            host_agent/lib/host_agent/mcp/fetch_files.ex
-#   mcp__fetch-postgres__execute_sql        postgres-mcp 0.3.0, restricted mode
+#   mcp__fetch-rows__fetch_row              host_agent/lib/host_agent/mcp/fetch_rows.ex
 #   mcp__mollow-memory__verify_fetched_bytes  webapp/lib/mollow/mcp/pointer_tools.ex
+#
+# ## The sql_row lane named `mcp__fetch-postgres__execute_sql` until MOL-6023
+#
+# It was replaced because step 2 below was UNSATISFIABLE through it, not because
+# a Mollow-owned server is tidier. Two reasons, and neither needed anything to
+# differ between the two sides:
+#
+#   * `execute_sql` returns a RESULT SET, not bytes. `sql-row-text-v1` hashes a
+#     JSON array of the row's column values, so producing what
+#     `verify_fetched_bytes` needs WAS the re-encoding step 2 forbids. There was
+#     no reading of the instruction a model could follow on that lane.
+#   * The column list, its order, and the `::text` cast on each are a contract.
+#     The REGISTERING side is handed it by `GET /api/host-node/pointer-sources`;
+#     the model was handed a uri carrying a prefix and a row key and no columns
+#     at all. It had to independently arrive at all three, and without the casts
+#     `numeric` and `timestamptz` come back as JSON numbers, which the form
+#     refuses as `cannot_canonicalize: non_text_value`.
+#
+# `fetch_row` takes the POINTER and issues the statement the source prescribes,
+# so its `bytes` ARE the canonical form and step 2's wording is now true here.
+# `fetch-postgres` is still configured for ad-hoc exploration; it is no longer
+# what a pointer is read through.
 #
 # Each entry pairs its OWN uri with its OWN hash on one line. Listing uris and
 # hashes as two collections invites pairing entry A's hash with entry B's bytes,
@@ -211,10 +233,10 @@ if [ "$mode" = "pointer" ]; then
     + "For each entry you use:\n"
     + "1. FETCH it. "
     + ( ( (if ($kinds | index("file")) then ["A `file` locator: call mcp__fetch-files__fetch_file with that entry'"'"'s uri."] else [] end)
-        + (if ($kinds | index("sql_row")) then ["A `sql_row` locator: call mcp__fetch-postgres__execute_sql."] else [] end)
+        + (if ($kinds | index("sql_row")) then ["A `sql_row` locator: call mcp__fetch-rows__fetch_row with that entry'"'"'s uri. Do NOT write SQL for these — that tool issues the statement the row was registered with, which is why its answer can match. Its `bytes` field is the content; pass that value through unchanged."] else [] end)
         ) | join(" ") )
     + " If a tool named here is not available in this session, skip ONLY the entries needing that tool and keep going with the ones you can fetch. NAME the entries you skipped and why, in your answer: an entry you cannot fetch is one you cannot check, and an unchecked pointer is retrieval with extra latency. A silent skip makes a partial answer look like a complete one.\n"
-    + "2. CHECK it. Call mcp__mollow-memory__verify_fetched_bytes with that same entry'"'"'s hash, that same entry'"'"'s canonical_form, and the bytes exactly as they came back — do not trim, re-indent or re-encode them.\n"
+    + "2. CHECK it. Call mcp__mollow-memory__verify_fetched_bytes with that same entry'"'"'s hash, that same entry'"'"'s canonical_form, and the bytes exactly as they came back — do not trim, re-indent or re-encode them. For a `file` that is the file'"'"'s content; for a `sql_row` it is the fetch tool'"'"'s `bytes` field. Both already carry the form they were hashed in, so reshaping either reports a mismatch on content nobody altered.\n"
     + "Pass canonical_form every time. Leaving it out does not fail — it widens the check to every record sharing that hash anywhere, so it can report a match from a record that is not yours while your own entry does not match.\n"
     + "Keep the hash, the canonical_form and the bytes from the SAME entry. Pairing one entry'"'"'s hash with another'"'"'s bytes reports a mismatch that is not real.\n\n"
     + "Entries:\n"

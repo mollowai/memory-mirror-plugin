@@ -174,11 +174,18 @@ match_used() {
             # whose hash verified. The emptiness that matters here is the HASH.
             # The HASH of this entry in a tool input, not its uri, not the prose.
             #
-            # Why the hash and not the uri (Greptile, #6228): the uri only appears
-            # in a FILE fetch. `mcp__fetch-postgres__execute_sql` receives SQL, not
-            # the `pg://` locator, so uri matching credited files and never rows —
-            # a blind spot for half the sources, not a small bias. The hash reaches
-            # `verify_fetched_bytes` whatever the kind.
+            # Why the hash and not the uri (Greptile, #6228): at the time, the uri
+            # only appeared in a FILE fetch. `mcp__fetch-postgres__execute_sql`
+            # received SQL rather than the `pg://` locator, so uri matching
+            # credited files and never rows — a blind spot for half the sources,
+            # not a small bias.
+            #
+            # MOL-6023 changed that half: `mcp__fetch-rows__fetch_row` takes the
+            # locator, so both kinds now pass a uri. The hash is still what this
+            # keys on, for the reason below rather than that one — it is the
+            # stronger signal, and it is the same signal for both kinds, which a
+            # uri is not (a `pg://` prefix collides across sibling row sources the
+            # way a file path collides across a corpus).
             #
             # And it is STRONGER evidence than a fetch. A fetch that failed —
             # unreadable, oversized, refused — still passes the uri to the tool, so

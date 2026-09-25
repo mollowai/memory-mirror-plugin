@@ -530,14 +530,42 @@ CTX="$(printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext //
 
 # §8: "the prompt names the tool" is the only remedy for the model not fetching.
 # All three names, spelled as the model sees them.
+#
+# The sql_row name CHANGED in MOL-6023, from `mcp__fetch-postgres__execute_sql`
+# to `mcp__fetch-rows__fetch_row`. That was not a rename: through `execute_sql`
+# the instruction in step 2 — "the bytes exactly as they came back" — had no
+# satisfiable reading, because that tool returns a result set and the model had
+# to build the canonical JSON array itself, which IS the re-encoding step 2
+# forbids.
 missing=""
-for t in "mcp__fetch-files__fetch_file" "mcp__fetch-postgres__execute_sql" "mcp__mollow-memory__verify_fetched_bytes"; do
+for t in "mcp__fetch-files__fetch_file" "mcp__fetch-rows__fetch_row" "mcp__mollow-memory__verify_fetched_bytes"; do
   printf '%s' "$CTX" | grep -qF "$t" || missing="$missing $t"
 done
 if [ -z "$missing" ]; then
   pass "pointer: injected context names all three tools by their real names"
 else
   fail "pointer: injected context names all three tools" "missing:$missing ctx='$CTX'"
+fi
+
+# THE NEGATIVE HALF, and the one that keeps the change from being undone by
+# accident. Naming the new tool while ALSO naming execute_sql would leave the
+# model free to author SQL for a pointer — the defect intact, with a second
+# route beside it. `fetch-postgres` stays CONFIGURED for ad-hoc exploration;
+# what it must not be is named as the way to read a locator.
+if ! printf '%s' "$CTX" | grep -qF "mcp__fetch-postgres__execute_sql"; then
+  pass "pointer: the grounding does NOT route a pointer through execute_sql"
+else
+  fail "pointer: the grounding does NOT route a pointer through execute_sql" "ctx='$CTX'"
+fi
+
+# The instruction has to say the row bytes arrive already canonical. Without
+# that sentence a model told "do not re-encode" still has to decide what the
+# bytes ARE, which is the ambiguity this whole change removes.
+# shellcheck disable=SC2016  # backticks are literal here, not a substitution
+if printf '%s' "$CTX" | grep -qF '`bytes` field'; then
+  pass "pointer: the sql_row lane names which field carries the bytes"
+else
+  fail "pointer: the sql_row lane names which field carries the bytes" "ctx='$CTX'"
 fi
 
 # No content crosses. The fixture carries none, so this asserts the WORDING does
@@ -673,7 +701,11 @@ else
 fi
 
 # A sql_row entry is credited too — the whole point of keying on the hash rather
-# than the uri, since execute_sql never receives the pg:// locator.
+# than the uri. The original reason was that `execute_sql` never received the
+# `pg://` locator at all; since MOL-6023 `fetch_row` DOES take it, so the reason
+# is now the other one the matcher gives: a verify carrying the hash is evidence
+# that bytes came back AND were checked, where a uri in a fetch is only evidence
+# that a fetch was attempted.
 reset_case
 export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
 export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
@@ -683,7 +715,7 @@ jq -cn --argjson ts "$GRD" '{grounding_id:"g-sql-1",grounded_at:$ts,mode:"pointe
 tpq="$CASE/tq.jsonl"; ptr_transcript "$tpq" "HASH_SQL" "Read the row and checked it."
 run_hook "supply-stop.sh" "{\"session_id\":\"sess-SQL\",\"transcript_path\":\"$tpq\",\"stop_hook_active\":false}"
 if grep -q "rec-sql" "$CURL_LOG"; then
-  pass "pointer stop: a sql_row entry IS credited (uri never reaches execute_sql)"
+  pass "pointer stop: a sql_row entry IS credited (keyed on the hash, not the uri)"
 else
   fail "pointer stop: sql_row must be creditable by hash" "log='$(cat "$CURL_LOG")'"
 fi
