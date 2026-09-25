@@ -140,12 +140,12 @@ mm_safe_component() {
 # POST JSON body ($2) to the supply seam path ($1) with timeout ($3, default 2s)
 # and print the response body.
 #
-# NOT mm_post_read: the `/seam/v1/*` endpoints authenticate the CALLER from
+# NOT mm_post_read: the `/grounding/v1/*` endpoints authenticate the CALLER from
 # `x-mollow-api-key` (the memory API's `Authorization: Bearer` header carries the
 # PROVIDER credential on the relay routes and would be consumed by an auth plug),
 # and resolve a workspace-scoped key from `x-mollow-workspace-id`. A space-scoped
 # key names its own tenant and ignores the workspace header. Same base as the
-# memory API — `mm_api_base` strips `/mcp/v2`, and `/seam/v1/...` sits at the
+# memory API — `mm_api_base` strips `/mcp/v2`, and `/grounding/v1/...` sits at the
 # root — so this reuses the same MOLLOW_MEMORY_* config and the mm_ready guards.
 # OUTPUT CONTRACT (changed by MOL-5978): the HTTP STATUS on the first line, then
 # the response body. Use `mm_seam_split_status` / `mm_seam_split_body` to take

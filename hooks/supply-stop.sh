@@ -4,7 +4,7 @@
 # The TRIGGER for the outcome post-back, not a transcript parser. The receipt
 # supply-ground.sh wrote at UserPromptSubmit already holds what was supplied
 # (grounding_id + each fact's message_hash), so the post-back needs nothing
-# parsed out of the transcript. POSTs POST /seam/v1/outcome for each pending
+# parsed out of the transcript. POSTs POST /grounding/v1/outcome for each pending
 # receipt of the session that just stopped.
 #
 # The one thing that DOES need the transcript is `used_fact_ids`: the answer text
@@ -307,6 +307,6 @@ else
 fi
 
 # Fire-and-forget: post back best-effort. The receipt is already consumed above.
-[ -n "$payload" ] && mm_seam_post_read "/seam/v1/outcome" "$payload" 2 >/dev/null 2>&1 || true
+[ -n "$payload" ] && mm_seam_post_read "/grounding/v1/outcome" "$payload" 2 >/dev/null 2>&1 || true
 
 exit 0

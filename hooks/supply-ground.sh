@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # UserPromptSubmit: supply mode dogfood (MOL-5857, Phase 3).
 #
-# Grounds THIS prompt from the whole register via POST /seam/v1/ground in
+# Grounds THIS prompt from the whole register via POST /grounding/v1/ground in
 # `facts` mode, injects the returned facts as additionalContext, and writes a
 # per-turn receipt the Stop hook (supply-stop.sh) posts back. Claude Code owns
 # composition (step 4 of the host flow) and calls Anthropic with the user's own
@@ -82,7 +82,7 @@ body="$(jq -cn --arg m "$mode" --arg q "$prompt" --argjson n "$limit" '{mode: $m
 
 # Hard 2s cap (harder than anything relay mode faces). A miss drops the grounding
 # and the turn proceeds ungrounded — empty output keeps it snappy.
-raw="$(mm_seam_post_read "/seam/v1/ground" "$body" 2)"
+raw="$(mm_seam_post_read "/grounding/v1/ground" "$body" 2)"
 status="$(mm_seam_split_status "$raw")"
 resp="$(mm_seam_split_body "$raw")"
 

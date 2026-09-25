@@ -2,9 +2,9 @@
 set -uo pipefail
 # Tests for the supply-mode dogfood hooks (MOL-5857):
 #   supply-ground.sh  (UserPromptSubmit) — grounds from the register via
-#                      POST /seam/v1/ground and injects the facts.
+#                      POST /grounding/v1/ground and injects the facts.
 #   supply-stop.sh     (Stop)            — posts the turn outcome back via
-#                      POST /seam/v1/outcome.
+#                      POST /grounding/v1/outcome.
 #
 # The contract this suite exists to nail down is the OFF state. Both hooks load
 # into EVERY Claude Code session on this machine, so a hook that phones home
@@ -191,12 +191,12 @@ if [ "$LAST_RC" -eq 0 ] && curl_called; then
 else
   fail "ground: on ⇒ ground call attempted" "rc=$LAST_RC curl='$(cat "$CURL_LOG")'"
 fi
-# curl went to /seam/v1/ground with x-mollow-api-key, not Authorization: Bearer
-if grep -q "/seam/v1/ground" "$CURL_LOG" && grep -q "x-mollow-api-key" "$CURL_LOG" \
+# curl went to /grounding/v1/ground with x-mollow-api-key, not Authorization: Bearer
+if grep -q "/grounding/v1/ground" "$CURL_LOG" && grep -q "x-mollow-api-key" "$CURL_LOG" \
    && ! grep -qi "Authorization: Bearer" "$CURL_LOG"; then
-  pass "ground: uses /seam/v1/ground with x-mollow-api-key (not Bearer)"
+  pass "ground: uses /grounding/v1/ground with x-mollow-api-key (not Bearer)"
 else
-  fail "ground: uses /seam/v1/ground with x-mollow-api-key (not Bearer)" "log='$(cat "$CURL_LOG")'"
+  fail "ground: uses /grounding/v1/ground with x-mollow-api-key (not Bearer)" "log='$(cat "$CURL_LOG")'"
 fi
 # injected context carries the fact content
 if printf '%s' "$LAST_OUT" | jq -e '.hookSpecificOutput.additionalContext | test("pinned commit")' >/dev/null 2>&1; then
@@ -305,10 +305,10 @@ cat >"$tp" <<'JSON'
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"As you noted, the staging deploy uses the pinned commit and skips the gate chain, so it is fast."}]}}
 JSON
 run_hook "supply-stop.sh" "{\"session_id\":\"sess-P\",\"transcript_path\":\"$tp\",\"stop_hook_active\":false}"
-if grep -q "/seam/v1/outcome" "$CURL_LOG"; then
-  pass "stop: on ⇒ posts to /seam/v1/outcome"
+if grep -q "/grounding/v1/outcome" "$CURL_LOG"; then
+  pass "stop: on ⇒ posts to /grounding/v1/outcome"
 else
-  fail "stop: on ⇒ posts to /seam/v1/outcome" "log='$(cat "$CURL_LOG")'"
+  fail "stop: on ⇒ posts to /grounding/v1/outcome" "log='$(cat "$CURL_LOG")'"
 fi
 # the posted body: grounding_id + status + latency_ms + used_fact_ids=[mh-one].
 # The shim logs the full arg vector ("$*"); the JSON body is the last field after
@@ -347,7 +347,7 @@ cat >"$tp" <<'JSON'
 {"type":"assistant","message":{"role":"assistant","content":"the staging deploy uses the pinned commit and skips the gate chain entirely"}}
 JSON
 run_hook "supply-stop.sh" "{\"session_id\":\"sess-STR\",\"transcript_path\":\"$tp\",\"stop_hook_active\":false}"
-if [ "$LAST_RC" -eq 0 ] && grep -q "/seam/v1/outcome" "$CURL_LOG"; then
+if [ "$LAST_RC" -eq 0 ] && grep -q "/grounding/v1/outcome" "$CURL_LOG"; then
   POSTED="$(awk 'BEGIN{RS="";} {print}' "$CURL_LOG")"
   if printf '%s' "$POSTED" | grep -q "mh-s"; then
     pass "stop: bare-string assistant content is handled (no crash, still matches)"
@@ -367,7 +367,7 @@ rdir="$TMPDIR/mollow-supply/sess-NT"
 mkdir -p "$rdir"
 echo '{"grounding_id":"g-nt","grounded_at":100,"facts":[{"citation_key":"mh-nt","match_text":"alpha beta gamma delta epsilon zeta eta theta"}]}' >"$rdir/g-nt.json"
 run_hook "supply-stop.sh" '{"session_id":"sess-NT","transcript_path":"/does/not/exist","stop_hook_active":false}'
-if grep -q "/seam/v1/outcome" "$CURL_LOG"; then
+if grep -q "/grounding/v1/outcome" "$CURL_LOG"; then
   POSTED="$(awk 'BEGIN{RS="";} {print}' "$CURL_LOG")"
   if ! printf '%s' "$POSTED" | grep -q "used_fact_ids"; then
     pass "stop: unreadable transcript ⇒ posts back but omits used_fact_ids (no guessing)"
@@ -407,7 +407,7 @@ cat >"$tp" <<'JSON'
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"the staging deploy uses the pinned commit and skips the gate chain entirely, noted."}]}}
 JSON
 run_hook "supply-stop.sh" "{\"session_id\":\"sess-STALE\",\"transcript_path\":\"$tp\",\"stop_hook_active\":false}"
-POSTS="$(grep -c "/seam/v1/outcome" "$CURL_LOG" 2>/dev/null || echo 0)"
+POSTS="$(grep -c "/grounding/v1/outcome" "$CURL_LOG" 2>/dev/null || echo 0)"
 POSTED="$(awk 'BEGIN{RS="";} {print}' "$CURL_LOG")"
 if [ "$POSTS" = "1" ] && printf '%s' "$POSTED" | grep -q "g-new" && ! printf '%s' "$POSTED" | grep -q "g-old"; then
   pass "stop: only the current turn's receipt is posted; stale receipt discarded"
