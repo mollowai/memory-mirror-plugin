@@ -374,12 +374,41 @@ mm_seen_add() {
     [ "$tries" -ge "$attempts" ] && return 1
   done
 
+  # Eviction is LEAST-RECENTLY-SEEN, and the shape of the filter is what makes it
+  # so. `(existing - $new) + $new` moves a re-seen id from wherever it was to the
+  # end, so the array reads oldest-first and `.[-500:]` drops the oldest.
+  #
+  # It used to be `(existing + $new) | unique | .[-500:]`, and **`unique` sorts**.
+  # So eviction kept the 500 lexicographically-highest ids and dropped the rest,
+  # with no relation to when anything was seen. Because these ids are content
+  # digests, that is arbitrary per fact and permanent: an id beginning `z` was
+  # retained forever, and one beginning `0` was evicted the instant the set passed
+  # 500 — so the same fact was re-injected every single turn while another stayed
+  # suppressed indefinitely. Measured directly: seed 500 ids sorting high, then add
+  # one sorting low, and the just-seen id is **absent from the result**.
+  #
+  # `- $new` also does the dedupe `unique` was there for, against the additions.
+  # `$new | unique` dedupes within one batch; that reorders ids inside a single
+  # turn, which carries no recency meaning, and never across turns, which does.
+  #
+  # NOT a TTL. A fact stays suppressed until 500 further ids are seen (~100 turns
+  # at 5 facts a turn), which is bounded but not time-based. A real TTL needs a
+  # timestamp per id, and that changes the on-disk shape both readers parse as a
+  # flat id array — a separate change with a migration, deliberately not bundled
+  # here.
+  #
   # Second branch covers an absent or corrupt file: start the key fresh rather
-  # than losing the write.
+  # than losing the write. It dedupes too, and that is not symmetry for its own
+  # sake: the first branch's dedupe comes from `- $new`, which has nothing to
+  # subtract from when the file is absent. Without `unique` here a FIRST write
+  # carrying a repeated id stored it twice, consuming two cap slots — measured
+  # `["dup","dup","other"]` on a fresh file. Greptile caught this on #6360; the
+  # test that was supposed to cover it passed only because its SECOND write
+  # cleaned up after the first.
   if jq -c --arg k "$key" --argjson new "$additions" \
-    '(. // {}) | .[$k] = (((.[$k] // []) + $new) | unique | .[-500:])' \
+    '(. // {}) | .[$k] = ((((.[$k] // []) - $new) + ($new | unique)) | .[-500:])' \
     "$file" 2>/dev/null >"$tmp" ||
-    jq -nc --arg k "$key" --argjson new "$additions" '{($k): $new}' >"$tmp" 2>/dev/null; then
+    jq -nc --arg k "$key" --argjson new "$additions" '{($k): ($new | unique)}' >"$tmp" 2>/dev/null; then
     mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
   else
     rm -f "$tmp" 2>/dev/null

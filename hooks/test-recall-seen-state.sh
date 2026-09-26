@@ -34,6 +34,97 @@ fail() {
 
 tmpdir() { mktemp -d "${TMPDIR:-/tmp}/mm-seen-XXXXXX"; }
 
+# ── eviction is by RECENCY, not lexicographic order ─────────────────────────
+#
+# The bug this fences: the cap used to be `(existing + new) | unique | .[-500:]`,
+# and `unique` SORTS. Eviction therefore kept the 500 lexicographically-highest
+# ids regardless of when they were seen — and because these ids are content
+# digests, that is arbitrary per fact and permanent. A fact whose digest sorted
+# low was re-injected every turn; one that sorted high stayed suppressed forever.
+#
+# The fixture is built so the two behaviours DISAGREE. 500 ids that sort ABOVE the
+# probe fill the cap; then the probe is seen. Under sorted eviction the probe is
+# dropped on the same write that recorded it. Under recency eviction the probe
+# survives and the oldest id goes. A fixture whose probe sorted high would pass
+# either way and fence nothing.
+t="$(tmpdir)"
+f="$t/seen.json"
+high="$(python3 -c "import json;print(json.dumps(['zzz%03d' % i for i in range(500)]))")"
+mm_seen_add "$f" "prod" "$high" || true
+before="$(jq -r '.prod | length' "$f")"
+if [ "$before" != "500" ]; then
+  fail "fixture precondition: cap should be full at 500" "got $before"
+else
+  mm_seen_add "$f" "prod" '["aaa-just-seen"]' || true
+  kept="$(jq -r '.prod | index("aaa-just-seen") // "absent"' "$f")"
+  oldest="$(jq -r '.prod | index("zzz000") // "absent"' "$f")"
+  count="$(jq -r '.prod | length' "$f")"
+
+  if [ "$kept" = "absent" ]; then
+    fail "a just-seen id was evicted on the write that recorded it" \
+      "this is the lexicographic-eviction bug: the probe sorts below every id in the cap"
+  elif [ "$oldest" != "absent" ]; then
+    fail "the oldest id survived while the cap stayed at $count" \
+      "eviction did not drop the least-recently-seen entry"
+  elif [ "$count" != "500" ]; then
+    fail "cap not honoured" "expected 500, got $count"
+  else
+    pass "eviction drops the least-recently-seen id, not the lexicographically-lowest"
+  fi
+fi
+
+# ── re-seeing an id REFRESHES it rather than leaving it stale ────────────────
+#
+# The property that makes the cap an LRU rather than a FIFO. Without it, an id
+# seen on every single turn would still age out after 500 others, and the fact
+# would be re-injected despite never having gone unseen.
+t="$(tmpdir)"
+f="$t/seen.json"
+mm_seen_add "$f" "prod" '["keep-me"]' || true
+filler="$(python3 -c "import json;print(json.dumps(['f%03d' % i for i in range(499)]))")"
+mm_seen_add "$f" "prod" "$filler" || true
+mm_seen_add "$f" "prod" '["keep-me"]' || true   # re-seen: moves to the end
+mm_seen_add "$f" "prod" '["one-more"]' || true  # forces an eviction
+if [ "$(jq -r '.prod | index("keep-me") // "absent"' "$f")" = "absent" ]; then
+  fail "a re-seen id was evicted" "re-seeing must move it to the end of the recency order"
+elif [ "$(jq -r '.prod | index("f000") // "absent"' "$f")" != "absent" ]; then
+  fail "the eviction dropped something other than the oldest" "f000 should have gone"
+else
+  pass "re-seeing an id refreshes its position, so it outlives older entries"
+fi
+
+# ── no duplicates, on the FIRST write as well as later ones ─────────────────
+#
+# Split into two cases because they go through DIFFERENT jq branches, and the
+# first version of this test only exercised one of them.
+#
+# An absent file makes the main filter fail, so mm_seen_add falls through to
+# `{($k): $new}` — which had no dedupe at all, because the main branch gets its
+# dedupe from `- $new` and there is nothing to subtract from when the key is new.
+# The original test wrote duplicates on a fresh file and then wrote again, so the
+# SECOND write cleaned up after the first and the assertion passed over a real
+# bug. Greptile caught that on #6360.
+t="$(tmpdir)"
+f="$t/seen.json"
+mm_seen_add "$f" "prod" '["dup","dup","other"]' || true   # fresh file: fallback branch
+first_total="$(jq -r '.prod | length' "$f")"
+first_uniq="$(jq -r '.prod | unique | length' "$f")"
+if [ "$first_total" != "$first_uniq" ]; then
+  fail "the FIRST write stored duplicates" \
+    "length=$first_total distinct=$first_uniq — the absent-file branch needs its own unique"
+else
+  pass "a first write into an absent file dedupes within the batch"
+fi
+
+mm_seen_add "$f" "prod" '["dup","other","third","third"]' || true  # file exists: main branch
+n_total="$(jq -r '.prod | length' "$f")"
+n_uniq="$(jq -r '.prod | unique | length' "$f")"
+if [ "$n_total" != "$n_uniq" ]; then
+  fail "duplicates accumulated on a subsequent write" "length=$n_total distinct=$n_uniq"
+else
+  pass "later writes stay distinct across and within batches"
+fi
+
 # ── records into a file that does not exist yet ──────────────────────────────
 t="$(tmpdir)"
 f="$t/seen.json"
