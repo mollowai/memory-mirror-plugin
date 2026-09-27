@@ -247,10 +247,42 @@ mm_grounding_status_hint() {
       printf 'Mollow supply mode: the grounding request was refused (400 workspace_not_named). Your key is workspace-scoped and MOLLOW_SUPPLY_WORKSPACE_ID is unset, so the request named no workspace.'
       ;;
     403)
-      printf 'Mollow supply mode: the grounding request was refused (403 workspace_not_yours). MOLLOW_SUPPLY_WORKSPACE_ID names a workspace this key does not own — check the workspace id, not the key.'
+      # TWO different refusals share this status and need OPPOSITE actions, so this
+      # reads the body rather than asserting one — the same correction the 422
+      # branch already took (Greptile, #6251).
+      #
+      #   JSON error.type=workspace_not_yours -> the APP. `tenant.ex:115`
+      #     `verify_workspace/2` refuses a workspace id that is malformed, absent,
+      #     or someone else's, and `ground_controller.ex:206` renders it 403.
+      #   no error.type (an HTML page) -> the EDGE. The request never reached
+      #     Phoenix, so no Mollow variable is implicated.
+      #
+      # Asserting workspace_not_yours for both sent the operator to edit a variable
+      # that was already correct, on the one failure where the path or the edge rule
+      # is what is actually wrong.
+      case "$(mm_grounding_error_type "${2:-}")" in
+        workspace_not_yours)
+          printf 'Mollow supply mode: the grounding request was refused (403 workspace_not_yours). MOLLOW_SUPPLY_WORKSPACE_ID names a workspace this key does not own, or is not a valid uuid — check the workspace id, not the key.'
+          ;;
+        "")
+          # Deliberately does not echo the body: it is an upstream error page, and
+          # pasting HTML in front of the operator every turn is its own defect.
+          printf 'Mollow supply mode: the grounding request was refused with a 403 carrying no Mollow error body, so it was blocked at the edge and never reached Mollow. This is not a workspace or credential problem — check that the request path is on the Cloudflare skip list (EDGE_SKIP_EXACT_PATHS in pulumi/dns_infrastructure.py).'
+          ;;
+        *)
+          printf 'Mollow supply mode: the grounding request was refused (403 %s).' \
+            "$(mm_grounding_error_type "${2:-}")"
+          ;;
+      esac
       ;;
     404)
-      printf 'Mollow supply mode: the grounding endpoint answered 404. Either supply_mode is off for your actor, the key is not valid, or the credential is in the wrong header (it reads x-mollow-api-key, not Authorization).'
+      # The PATH is named because it is the one candidate the operator cannot rule
+      # out from the message otherwise. The hooks hardcode the wire path and no env
+      # var repoints them, so a half-landed path rename 404s identically to a flag
+      # being off — and an operator told "flag, key, or header" checks all three,
+      # finds them correct, and has nowhere left to look.
+      printf 'Mollow supply mode: the grounding endpoint answered 404 for POST %s/grounding/v1/ground. Either supply_mode is off for your actor, the key is not valid, the credential is in the wrong header (it reads x-mollow-api-key, not Authorization), or that path is not what the router serves — compare it against the scope in webapp/lib/mollow_web/router.ex.' \
+        "$(mm_api_base)"
       ;;
     422)
       # 422 is the one status that covers several unrelated causes, so it reads

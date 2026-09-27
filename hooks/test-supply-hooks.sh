@@ -919,6 +919,50 @@ else
 fi
 unset CURL_STATUS
 
+# THE OTHER 403, and the reason the one above is not enough on its own. Two
+# DIFFERENT refusals share this status and need OPPOSITE actions:
+#
+#   JSON  {"error":{"type":"workspace_not_yours"}}  -> the app; fix the workspace id
+#   HTML  <!DOCTYPE html> ... Cloudflare ...        -> the EDGE; the request never
+#                                                     reached Phoenix at all
+#
+# The app 403 is real and reachable — `tenant.ex:115` `verify_workspace/2` returns
+# `:workspace_not_yours` for a workspace id that is malformed, absent, or someone
+# else's, and `ground_controller.ex:206` renders it 403. So the fix is NOT "treat
+# every 403 as the edge"; it is to READ THE BODY, the same correction the 422
+# branch already took (Greptile #6251).
+#
+# This fixture is the one that matters once MOLLOW_SUPPLY_WORKSPACE_ID is actually
+# set, because from then on both 403s are plausible and asserting the wrong one
+# sends the operator to edit a variable that is already correct.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_STATUS=403
+# A real Cloudflare refusal body: HTML, so it carries no `error.type` at all.
+cat >"$CASE/e403html.json" <<'HTMLBODY'
+<!DOCTYPE html><html><head><title>Just a moment...</title></head>
+<body><div class="cf-error-details">Sorry, you have been blocked</div></body></html>
+HTMLBODY
+export CURL_BODY_FILE="$CASE/e403html.json"
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-403-edge","cwd":"/tmp"}'
+E3H="$(printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext // ""' 2>/dev/null)"
+if [ "$LAST_RC" -eq 0 ] \
+  && printf '%s' "$E3H" | grep -qiF "edge" \
+  && ! printf '%s' "$E3H" | grep -qF "MOLLOW_SUPPLY_WORKSPACE_ID"; then
+  pass "status: a 403 with NO error.type is named as the edge, not the workspace id"
+else
+  fail "status: an HTML 403 must be attributed to the edge, not MOLLOW_SUPPLY_WORKSPACE_ID" \
+    "rc=$LAST_RC ctx='$E3H'"
+fi
+# The hint must never echo the HTML it read — that body is an upstream error page
+# and pasting it in front of the operator is noise at best.
+if ! printf '%s' "$E3H" | grep -qF "<!DOCTYPE"; then
+  pass "status: the edge hint does not paste the upstream HTML body"
+else
+  fail "status: the edge hint leaked the HTML body" "ctx='$E3H'"
+fi
+unset CURL_STATUS
+
 # 422 covers several unrelated causes, so the hint reads the body's error.type
 # rather than guessing from the status. One fixture per type, because guessing
 # was wrong in a way a single fixture could not show: naming invalid_mode blamed
@@ -987,6 +1031,27 @@ if [ "$LAST_RC" -eq 0 ] && printf '%s' "$E4" | grep -qF "supply_mode"; then
   pass "status: a 404 names the flag/key/header causes"
 else
   fail "status: 404 must be surfaced" "rc=$LAST_RC ctx='$E4'"
+fi
+# ...and the PATH, which it did not name. The hooks hardcode the wire path
+# (`supply-ground.sh` builds `$(mm_api_base)$path`) and no env var can repoint
+# them, so a half-landed path rename produces exactly this 404 — and an operator
+# handed "flag, key, or header" will check all three, find them correct, and have
+# nowhere left to look.
+#
+# Asserted on the LITERAL wire path, not on the word "path" or "endpoint". The
+# loose version PASSED before the fix existed, because the message already said
+# "the grounding ENDPOINT answered 404" — it matched a word that was always there
+# rather than the cause being added. The literal path is also the useful thing: it
+# tells the operator which path the hook actually asked for.
+# The FULL path, including the final segment. Greptile caught this one segment
+# short (#6375): `/grounding/v1` still matches if the path drifts to a different
+# action under the same scope, which is a realistic half-landed rename and exactly
+# the 404 this branch exists to explain. Second tightening of this assertion — the
+# first version matched the word "endpoint" and passed before the fix existed.
+if printf '%s' "$E4" | grep -qF "/grounding/v1/ground"; then
+  pass "status: a 404 names the full literal wire path it requested"
+else
+  fail "status: 404 must name the wire path — a stale path 404s identically" "ctx='$E4'"
 fi
 unset CURL_STATUS
 
