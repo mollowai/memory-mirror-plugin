@@ -24,8 +24,12 @@ auto-sync hook call this, so parsing has a single source of truth.
 
 CONTRACT — FROZEN: the import dedups on a hash of `content`. The content
 assembly here ("{name}\\n\\n{description}\\n\\n{body}") and the `_field`
-frontmatter reader must never change, or re-imports would duplicate instead of
-dedup.
+frontmatter reader must not change the bytes of an entry that already parses
+correctly, or re-imports would duplicate instead of dedup. The one deliberate
+exception is a value the reader used to truncate at an escaped quote (MOL-6198):
+its corrected content hashes differently and supersedes the truncated row.
+Any change here lands in `HostAgent.MemoryParser` in the same commit —
+`memory_parser_golden_test.exs` fails when the two diverge.
 
 Usage:
     extract-local-memories.py                 # current project (cwd)
@@ -69,13 +73,56 @@ LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 LABEL_STRIP = " \t\r—·"
 
 
-def _unquote(value):
+# A quoted scalar runs to its first UNESCAPED closing quote: `\"` inside double
+# quotes, `''` inside single quotes. `[^"]*` stopped at the first escape and
+# dropped the rest of the value (MOL-4549, recurred as MOL-6198).
+DOUBLE_QUOTED_RE = re.compile(r'^"((?:[^"\\]|\\.)*)"(.*)$')
+SINGLE_QUOTED_RE = re.compile(r"^'((?:[^']|'')*)'(.*)$")
+# The pre-MOL-6198 pattern. It still decides any value the new one cannot close
+# (`"ends in a backslash\"`), so that value keeps the bytes it always had.
+LEGACY_DOUBLE_QUOTED_RE = re.compile(r'^"([^"]*)"(.*)$')
+# Only `\"` is unescaped. `\\` and every other backslash sequence keep their
+# bytes: the old pattern read those values in full, and collapsing them would
+# move the content hash of an unchanged file. HostAgent.MemoryParser mirrors this.
+BACKSLASH_PAIR_RE = re.compile(r"\\(.)")
+
+
+def _unescape_quotes(inner):
+    return BACKSLASH_PAIR_RE.sub(lambda m: '"' if m.group(1) == '"' else m.group(0), inner)
+
+
+# `name` keeps the pre-MOL-6198 parse byte for byte. It is the server's supersede
+# key (with project + source_file): if its bytes moved, a re-import would miss
+# the prior row and both versions would stay active in recall. A name that still
+# truncates is reported through `on_trailing` instead.
+LEGACY_FIELDS = frozenset({"name"})
+LEGACY_SINGLE_QUOTED_RE = re.compile(r"^'([^']*)'(.*)$")
+
+
+def _unquote(value, on_trailing=None, legacy=False):
+    """Strip one level of quoting. `on_trailing(rest)` is called when text follows
+    the closing quote — the shape that still loses part of the line."""
     value = value.strip()
-    m = re.match(r'^"([^"]*)"', value) or re.match(r"^'([^']*)'", value)
-    return m.group(1) if m else value
+    if legacy:
+        m = LEGACY_DOUBLE_QUOTED_RE.match(value) or LEGACY_SINGLE_QUOTED_RE.match(value)
+        if not m:
+            return value
+        inner = m.group(1)
+    elif m := DOUBLE_QUOTED_RE.match(value):
+        inner = _unescape_quotes(m.group(1))
+    elif m := LEGACY_DOUBLE_QUOTED_RE.match(value):
+        inner = m.group(1)
+    else:
+        m = SINGLE_QUOTED_RE.match(value)
+        if not m:
+            return value
+        inner = m.group(1).replace("''", "'")
+    if on_trailing and m.group(2).strip():
+        on_trailing(m.group(2).strip())
+    return inner
 
 
-def _field(frontmatter, key):
+def _field(frontmatter, key, on_trailing=None):
     """Pull a scalar `key` from a frontmatter block — top-level or nested,
     inline or folded/block (`>-`, `|`). Returns None when absent."""
     lines = frontmatter.split("\n")
@@ -95,12 +142,16 @@ def _field(frontmatter, key):
                 collected.append(nxt.strip())
             joined = " ".join(collected).strip()
             return joined or None
-        return _unquote(value)
+        report = on_trailing and (lambda rest: on_trailing(key, rest))
+        return _unquote(value, report, legacy=key in LEGACY_FIELDS)
     return None
 
 
-def parse_frontmatter(text):
-    """Return (meta_dict, body). meta_dict has name/description/type/originSessionId."""
+def parse_frontmatter(text, on_trailing=None):
+    """Return (meta_dict, body). meta_dict has name/description/type/originSessionId.
+
+    `on_trailing(key, rest)` reports a quoted field with text after its closing
+    quote; that text is dropped from the value."""
     if not text.startswith("---"):
         return {}, text
     m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, re.DOTALL)
@@ -111,7 +162,7 @@ def parse_frontmatter(text):
     # `_field` is the single, deliberate parse path (no PyYAML — see module
     # docstring). It matches at any indent, so it finds `type` whether it sits
     # at the top level or nested under `metadata:`.
-    meta = {key: _field(fm_raw, key) for key in ("name", "description", "type", "originSessionId")}
+    meta = {key: _field(fm_raw, key, on_trailing) for key in ("name", "description", "type", "originSessionId")}
 
     return {k: v for k, v in meta.items() if v}, body
 
@@ -184,7 +235,15 @@ def file_entry(path: Path, project, labels=None):
     unlinked (absent from the map). `None` leaves the entry unmarked, so a
     legacy/partial client that simply omits index fields never erases a label.
     """
-    meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+
+    def warn_trailing(key, rest):
+        # stderr only: stdout is the JSON the import reads. The auto-sync hook
+        # discards stderr, so this reaches direct and skill-driven runs.
+        sys.stderr.write(
+            f"warning: {path.name}: `{key}` has text after its closing quote, which is dropped: {rest!r}\n"
+        )
+
+    meta, body = parse_frontmatter(path.read_text(encoding="utf-8"), warn_trailing)
     filename = path.name
     name = meta.get("name") or path.stem
     description = meta.get("description")
