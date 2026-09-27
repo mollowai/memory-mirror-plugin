@@ -53,6 +53,8 @@ CLAUDE_JSON = Path("~/.claude.json").expanduser()
 IMPORT_CHUNK = 100  # server caps a batch at 100.
 
 _EXTRACT = Path(__file__).with_name("extract-local-memories.py")
+# `mm_repo_of` lives here. Shelled out to, never reimplemented — see resolve_repo.
+_COMMON_SH = Path(__file__).resolve().parents[1] / "hooks/_common.sh"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -271,9 +273,89 @@ def _find_mollow_memory_url(node):
     return None
 
 
-def extract_entries(project=None, all_projects=False, skip_ephemeral=False, dir_path=None):
+def scope_carries_repo(all_projects=False, dir_path=None):
+    """May entries from this scope be stamped with a single `repo`?
+
+    Only a single-project scope may. `--repo` is stamped on EVERY extracted
+    entry (extract-local-memories.py:361-363), so a scope covering more than one
+    project has no single right answer:
+
+    * `--all` is every project under the root (:305). One `--repo` would claim
+      all of them belong to this one.
+    * `--dir` names a MEMORY directory, not a project. The slug is lossy (`/`
+      and `.` both become `-`) so it cannot be inverted to find the owner.
+
+    Guessing either way routes ANOTHER project's memories into this repo's
+    shared, undeletable Space — worse than the private-workspace landing it
+    would be fixing (Greptile #5333, and sync.py carries the same refusal).
+    Returning False leaves them unrouted, which is recoverable: a later
+    single-project run re-posts them and import dedups on the content hash.
+    """
+    if dir_path:
+        return False
+    return not all_projects
+
+
+def resolve_repo(project_dir):
+    """Repo identity for `project_dir` — `github.com/owner/name`, or None.
+
+    SHELLS OUT to `mm_repo_of` rather than reimplementing the rule, and that is
+    the point: `repo` is the destination map's key, MOL-4691 already requires
+    three producers to agree on it, and a fourth spelling here would drift
+    silently. The failure it would cause — a memory routed to the private
+    workspace instead of its Space — is invisible from this side.
+
+    None is a legitimate outcome: most projects map to no Space. The caller
+    reports which case it is, so "no repo could be resolved" is never mistaken
+    for "resolved, and it routes nowhere".
+    """
+    if not _COMMON_SH.is_file():
+        return None
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", 'set -e; . "$1"; mm_repo_of "$2"', "_", str(_COMMON_SH), str(project_dir)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def repo_for_args(args):
+    """The `repo` to stamp for this invocation, plus why — (repo, routing).
+
+    `routing` is REPORTED by every command, because an entry with no `repo`
+    imports fine and lands in the private workspace, which from the caller's
+    side is indistinguishable from a correct route. Naming the state is the only
+    thing that separates "this project maps to no Space, as expected" from "the
+    field was never sent, so nothing could map".
+    """
+    if not scope_carries_repo(all_projects=args.all, dir_path=args.dir):
+        scope = "--dir names a memory dir, not a project" if args.dir else "--all spans every project"
+        return None, (
+            f"unresolved — {scope}, so no single `repo` can be stamped; entries land in the "
+            "private workspace. Re-run per project (--project <repo-checkout>) to route them"
+        )
+    repo = resolve_repo(Path(args.project).expanduser() if args.project else Path.cwd())
+    if repo:
+        return repo, f"resolved — {repo}"
+    return None, "unresolved — this project maps to no Space; entries land in the private workspace"
+
+
+def extract_entries(project=None, all_projects=False, skip_ephemeral=False, dir_path=None, repo=None):
     """Shell out to the frozen extractor so the byte contract is identical to
-    the hook's import path."""
+    the hook's import path.
+
+    `repo` is what `import-local-memories.sh` passes (hooks/import-local-memories.sh:101)
+    and what `process_import_entry` routes on. Omitting it — this function's only
+    behaviour until MOL-6187 — produced entries carrying just `project`, the
+    directory slug, which the destination map never consults. So every entry
+    `push` ever sent landed in the private workspace while reporting success.
+    """
     cmd = [sys.executable, str(_EXTRACT)]
     if dir_path:
         cmd += ["--dir", dir_path]
@@ -283,6 +365,11 @@ def extract_entries(project=None, all_projects=False, skip_ephemeral=False, dir_
         cmd += ["--project", project]
     if skip_ephemeral:
         cmd.append("--skip-ephemeral")
+    # Omitted, never blank: an empty `--repo` is a route key matching nothing,
+    # and entry-for-entry parity with the Elixir parser's golden test depends on
+    # the field being ABSENT rather than present-and-empty.
+    if repo:
+        cmd += ["--repo", repo]
     out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
     return json.loads(out or "[]")
 
@@ -344,23 +431,163 @@ def fetch_stats(base, key, timeout=30):
         return None
 
 
-def post_import(base, key, entries, timeout=30):
-    """POST entries in chunks. Returns aggregate {ok, deduped, error}."""
-    agg = {"ok": 0, "deduped": 0, "error": 0}
+# A gateway gave up waiting. Says nothing about whether the write committed —
+# measured 2026-09-27, a 524 at 125 s had fully committed (MOL-6187 / MOL-6165).
+# 500 is excluded on purpose: it is the app reporting its own failure, not a
+# proxy timing out, so re-posting it just repeats a request the server rejected.
+_GATEWAY_TIMEOUT_STATUSES = frozenset({502, 503, 504, 524})
+
+
+# Where a push records the per-entry hashes it got back. For a ROUTED push these are
+# the only read-back that exists (the export cannot see a Space), so they have to
+# outlive the run — and there can be ~1,100 of them, which is not stdout material.
+HASHES_PATH = Path.home() / ".mollow/.memory-sync-import-hashes.json"
+
+
+def _post_chunk(base, key, chunk, timeout):
+    """One chunk, with exactly one re-post on a gateway/transport timeout.
+
+    Returns (count_dict, reposted: bool). Raises RuntimeError when the fate
+    cannot be established.
+
+    Re-posting is safe because the import dedups on a frozen content hash, so a
+    chunk that already landed comes back `deduped` rather than doubled. What the
+    re-post establishes is that the rows ARE PRESENT NOW — which is the thing the
+    sync actually needs.
+
+    It does NOT establish which attempt put them there, and `deduped` must not be
+    read that way: the hash may have been present from an EARLIER sync entirely, so
+    `deduped` conflates "the timed-out call committed" with "this was already here".
+    Both are fine outcomes and neither needs distinguishing; the claim to avoid is
+    the stronger one (Greptile on #6389 — an earlier version of this docstring made
+    exactly that error).
+
+    Bounded at one retry: each attempt costs the full server-side import (125 s
+    measured), so an unbounded loop turns one slow sync into a multi-minute stall
+    per chunk.
+    """
+    body_obj = {"entries": chunk}
+    url = base + "/api/memory/import"
+
+    def attempt():
+        status, body = _curl("POST", url, key, body_obj, timeout)
+        if status == 200:
+            parsed = json.loads(body)
+            # `results` carries the per-entry `message_hash`
+            # (handle_import_claude_memories returns `%{results:, count:}`;
+            # memory_tools.ex:206/264/342). Kept, not discarded: for a routed push it
+            # is the ONLY read-back, since the export cannot see a Space. `.get`
+            # rather than `[]` so a body without it leaves the hashes empty instead
+            # of failing the push.
+            return {**parsed.get("count", {}), "_results": parsed.get("results") or []}
+        return status
+
+    try:
+        first = attempt()
+    except RuntimeError as exc:
+        # curl could not complete (timeout, reset). Same epistemic state as a
+        # 524: unknown, and knowable only by asking again.
+        first = f"transport: {exc}"
+    if isinstance(first, dict):
+        return first, False
+
+    # A 4xx is OURS — a malformed body, a bad key. Re-posting sends the same
+    # broken request twice and buries the message that names the defect.
+    if isinstance(first, int) and first not in _GATEWAY_TIMEOUT_STATUSES:
+        raise RuntimeError(f"import HTTP {first} from {base}")
+
+    try:
+        second = attempt()
+    except RuntimeError as exc:
+        raise RuntimeError(f"import to {base} failed twice: first {first}, re-post {exc}") from exc
+    if isinstance(second, dict):
+        return second, True
+    raise RuntimeError(
+        f"import to {base} failed twice (first {first}, re-post HTTP {second}) — "
+        "the write may still have committed; re-post and read `deduped` before re-syncing"
+    )
+
+
+def post_import(base, key, entries, timeout=900):
+    """POST entries in chunks. Returns aggregate {ok, deduped, error, reposted}.
+
+    `timeout` defaults high because the server-side import is slow: 48 entries /
+    163 KB took 125 s (MOL-6187). The old 30 s default was below that for every
+    full IMPORT_CHUNK, so the documented `push` timed out by construction — and
+    then raised, discarding the counts of every chunk that had already landed.
+
+    `reposted` counts chunks that needed a second attempt. It is surfaced rather
+    than swallowed so a caller can see a timeout happened at all — the counts alone
+    would look like an ordinary slow sync. It does not license reading `deduped` as
+    proof that the timed-out attempt committed; see `_post_chunk`.
+    """
+    agg = {"ok": 0, "deduped": 0, "error": 0, "reposted": 0, "hashes": []}
     for i in range(0, len(entries), IMPORT_CHUNK):
-        chunk = entries[i : i + IMPORT_CHUNK]
-        status, body = _curl("POST", base + "/api/memory/import", key, {"entries": chunk}, timeout)
-        if status != 200:
-            raise RuntimeError(f"import HTTP {status} from {base}")
-        count = json.loads(body).get("count", {})
-        for k in agg:
+        count, reposted = _post_chunk(base, key, entries[i : i + IMPORT_CHUNK], timeout)
+        for k in ("ok", "deduped", "error"):
             agg[k] += count.get(k, 0)
+        agg["reposted"] += 1 if reposted else 0
+        for r in count.get("_results", []):
+            if isinstance(r, dict) and r.get("message_hash"):
+                agg["hashes"].append(
+                    {"name": r.get("name"), "message_hash": r["message_hash"], "deduped": r.get("deduped")}
+                )
     return agg
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Commands
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+def export_can_observe(repo):
+    """Can `GET /api/memory/export` see where entries from this scope land?
+
+    No, once they route. The export is WORKSPACE-scoped:
+    `memory_export_controller.ex:174-178` filters
+    `where: c.workspace_id == ^workspace_id` through the channel join, and its
+    docstring at `:12` says "every Etch message in the workspace". A routed entry
+    lands in a Space channel that query cannot return.
+
+    Before repo routing existed this was consistent by accident — `push` sent
+    everything to the private workspace and `verify` read that same workspace.
+    Adding routing split the two, so a routed entry would read as MISSING forever
+    and `--repair` would re-send it on every run (Greptile P1 on #6389).
+
+    CONSERVATIVE, and knowingly so: a resolved `repo` means the entries CAN route,
+    not that they do. `memory_destinations` is keyed `(user_id, repo)` and most
+    projects have no row, so an unmapped project's entries land in the private
+    workspace — where the export would in fact have seen them. This still refuses,
+    because nothing on this side can tell the two apart: the destination map is not
+    exposed to the client, and the import's response does not say where a row went.
+    So the choice is between a false refusal and a false "N missing", and only one
+    of those gets acted on by `--repair`.
+
+    If you need the export path for such a project, widen the scope (`--all`) so
+    nothing routes. Narrowing this properly needs the server to report the
+    destination it chose — worth having, and not built.
+    """
+    return repo is None
+
+
+# Exit code for "this instrument cannot answer the question you asked". Distinct
+# from 1 (entries are genuinely missing) and 0 (all present), because a confident
+# wrong number is the failure being avoided — not an absent one.
+EXIT_UNOBSERVABLE = 3
+
+
+def _refuse_unobservable(repo, what):
+    sys.stderr.write(
+        f"memory-sync: cannot {what} a routed scope.\n"
+        f"  Entries carry repo={repo}, so they land in that project's Space, but\n"
+        "  GET /api/memory/export is WORKSPACE-scoped (memory_export_controller.ex:174-178)\n"
+        "  and cannot return a Space channel's messages. Diffing against it would report\n"
+        "  every correctly-routed entry as missing — and --repair would re-send them on\n"
+        "  every run.\n"
+        "  Read-back for a routed entry needs verify_stored_memory with a message_hash the\n"
+        "  import returned. To exercise this path against the private workspace instead,\n"
+        "  widen the scope (--all) so nothing routes.\n"
+    )
 
 
 def _guard(target):
@@ -392,10 +619,16 @@ def cmd_status(args):
     else:
         print(f"  config       : ✗ DISAGREEMENT across {', '.join(dis['envs'])} — run fleet-target to reconcile")
 
+    repo, routing = repo_for_args(args)
     entries = extract_entries(
-        project=args.project, all_projects=args.all, skip_ephemeral=args.skip_ephemeral, dir_path=args.dir
+        project=args.project,
+        all_projects=args.all,
+        skip_ephemeral=args.skip_ephemeral,
+        dir_path=args.dir,
+        repo=repo,
     )
     print(f"  local entries: {len(entries)}")
+    print(f"  routing      : {routing}")
     if _guard(target):
         stats = fetch_stats(target["base"], target["key"])
         if stats:
@@ -410,8 +643,20 @@ def cmd_verify(args):
     target = resolve_target(args.env, os.environ, selected, read_keyfile())
     if not _guard(target):
         return 2
+    # Extract exactly as `push` does, `repo` included. The diff itself keys on
+    # `content`, which `--repo` never touches (it only adds a field), so this
+    # changes no verdict — but a verify that extracted differently from the push
+    # it gates would be checking a payload nobody sends.
+    repo, _routing = repo_for_args(args)
+    if not export_can_observe(repo):
+        _refuse_unobservable(repo, "verify")
+        return EXIT_UNOBSERVABLE
     entries = extract_entries(
-        project=args.project, all_projects=args.all, skip_ephemeral=args.skip_ephemeral, dir_path=args.dir
+        project=args.project,
+        all_projects=args.all,
+        skip_ephemeral=args.skip_ephemeral,
+        dir_path=args.dir,
+        repo=repo,
     )
     try:
         export = fetch_export(target["base"], target["key"])
@@ -438,9 +683,49 @@ def cmd_push(args):
     target = resolve_target(args.env, os.environ, selected, read_keyfile())
     if not _guard(target):
         return 2
+    repo, routing = repo_for_args(args)
+    # A plain push is fine either way — the import routes on `repo` and needs no
+    # read-back. Only --repair is unsafe, because it DIFFS against the
+    # workspace-scoped export and then acts on the result, so a routed scope makes
+    # it re-send the whole corpus on every run.
+    if args.repair and not export_can_observe(repo):
+        _refuse_unobservable(repo, "repair")
+        return EXIT_UNOBSERVABLE
+    if args.repair:
+        # The precondition this tool CANNOT check, so it states it instead.
+        #
+        # `--repair` acts on an absence inferred from the workspace-scoped export.
+        # If these memories already live in a Space, the export does not return
+        # them, they read as missing, and repairing that imports fresh copies with
+        # no `repo` — a second, PRIVATE copy beside the Space one. It repairs a
+        # phantom.
+        #
+        # Undetectable from here: `--dir` is the only scope repair accepts and its
+        # slug is not invertible, so the project cannot be identified to ask whether
+        # it routes; and the destination map is not exposed to clients regardless.
+        # The operator knows and the tool does not (Greptile P1, round 4, on #6389).
+        sys.stderr.write(
+            "memory-sync: WARNING — repair infers what is missing from a WORKSPACE-scoped\n"
+            "  export (memory_export_controller.ex:174-178). If this project's memories\n"
+            "  already live in a SPACE, they are absent from that export, will read as\n"
+            "  missing, and this run will import PRIVATE DUPLICATES beside them rather than\n"
+            "  repairing the Space.\n"
+            "  This cannot be checked from here — --dir's slug is not invertible and the\n"
+            "  destination map is not exposed. Only repair a project you know does not route.\n"
+            "  To check one entry, use verify_stored_memory with a message_hash the import\n"
+            "  returned.\n"
+        )
     entries = extract_entries(
-        project=args.project, all_projects=args.all, skip_ephemeral=args.skip_ephemeral, dir_path=args.dir
+        project=args.project,
+        all_projects=args.all,
+        skip_ephemeral=args.skip_ephemeral,
+        dir_path=args.dir,
+        repo=repo,
     )
+    # Printed BEFORE the request, not after: this is the one thing about a push
+    # the response body cannot tell you. `count: {ok, deduped, error}` looks
+    # identical whether the rows reached their Space or the private workspace.
+    print(f"routing: {routing}")
 
     try:
         if args.repair:
@@ -458,6 +743,31 @@ def cmd_push(args):
     new = agg["ok"] - agg["deduped"]
     print(f"push to {target['env']} ({target['url']})")
     print(f"  sent: {len(entries)}   new: {new}   deduped: {agg['deduped']}   error: {agg['error']}")
+    # Written, and the PATH printed. Both docs tell an operator to confirm an entry
+    # with verify_stored_memory on "a message_hash the import returned" — and until
+    # now post_import discarded them, so there was no hash to pass and the documented
+    # check could not be performed (Greptile P1, round 5, on #6389). For a routed
+    # push this file is the only read-back that exists.
+    if agg.get("hashes"):
+        try:
+            HASHES_PATH.parent.mkdir(parents=True, exist_ok=True)
+            HASHES_PATH.write_text(json.dumps(agg["hashes"], indent=2))
+            print(f"  hashes: {len(agg['hashes'])} written to {HASHES_PATH}")
+            print("          pass any `message_hash` to verify_stored_memory to confirm that row landed")
+        except OSError as exc:
+            # Not fatal — the import already happened. But say it, because the
+            # read-back the docs promise is now unavailable for this run.
+            sys.stderr.write(f"memory-sync: could not write {HASHES_PATH} ({exc}); read-back hashes are lost\n")
+    if agg["reposted"]:
+        # Said out loud because otherwise a timeout looks like an ordinary slow
+        # sync. Deliberately does NOT claim the first attempt committed: `deduped`
+        # cannot separate that from "already present from an earlier sync". The
+        # re-post's 200 establishes the rows are present now, which is what matters.
+        print(
+            f"  reposted: {agg['reposted']} chunk(s) timed out and were re-posted once; "
+            "the re-post confirms these rows are present now (which attempt landed them "
+            "is not determinable from `deduped`)"
+        )
     return 0 if agg["error"] == 0 else 1
 
 

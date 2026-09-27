@@ -90,17 +90,150 @@ what's actually in the cloud rather than trusting local state.
 # Is everything, across every project, present in the current target env?
 python3 plugins/memory-mirror/scripts/memory_sync.py --all verify
 
-# Where am I pointed, and do the three config sources agree?
+# Where am I pointed, do the three config sources agree, and will entries route?
 python3 plugins/memory-mirror/scripts/memory_sync.py status
 
-# Push only the entries verify found missing (scope with --dir/--project/--all).
-python3 plugins/memory-mirror/scripts/memory_sync.py --all push --repair
+# Repair ONE project that you know does NOT route to a Space. Read the section below
+# before running this — on a routed project it creates private duplicates.
+python3 plugins/memory-mirror/scripts/memory_sync.py \
+  --dir ~/.claude/projects/-Users-me-dev-myrepo/memory push --repair
+
+# Route this project's memories to its Space. No --repair — see below.
+python3 plugins/memory-mirror/scripts/memory_sync.py --project "$(git rev-parse --show-toplevel)" push
 ```
+
+### `--repair` has a precondition the tool cannot check
+
+`/api/memory/export` is **workspace-scoped**
+(`memory_export_controller.ex:174-178`), so it does not return Space channels. That
+means `verify`'s "missing" cannot distinguish *absent* from *present in a Space* —
+and repairing a routed project's apparent absence imports fresh copies carrying no
+`repo`, landing a second **private** copy beside the Space one. It repairs a phantom.
+
+Nothing client-side can rule this out: `--dir`'s slug is not invertible, so the
+project cannot be identified to ask whether it routes, and the destination map is not
+exposed. So `--repair` prints the precondition on every run instead of implying it
+holds.
+
+| If the project… | do this |
+|---|---|
+| does **not** route to a Space | `--dir <its memory dir> push --repair`. One project, unrouted, so the export reads exactly where the entries land |
+| **does** route | **no repair path today**, and no placement check either — see below |
+
+Every `push` writes the per-entry hashes the import returned under `~/.mollow/` and
+**prints the absolute path** (the `HASHES_PATH` constant in
+`plugins/memory-mirror/scripts/memory_sync.py`). Pass one to `verify_stored_memory`:
+`verified: true` means that row **exists in Mollow with its content intact**.
+
+**It does not mean the row reached its Space.** The lookup is global by hash and
+deliberately unscoped — `get_message_by_hash/1` is documented "globally (NOT
+channel-scoped)" (`webapp/lib/mollow/etch.ex:1603-1613`), since provenance
+verification is a third-party operation — so it returns `verified: true` just the same
+for an entry that fell back to the private workspace. Presence and integrity, not
+placement.
+
+**One placement check exists, and only in one direction.** With a **Space-scoped
+credential** (a Space `mol_*` key, or an OAuth token carrying `space:<uuid>`),
+`search_memories` "searches that Space's memory channel only"
+(`webapp/lib/mollow/mcp/memory_tools.ex:278`) and each result carries a `message_hash`
+(`:2596`) — so a result matching a hash from the push is **positive evidence the row is
+in that Space**.
+
+A miss proves nothing: measured 2026-09-26, a known-landed row came back absent from
+`search_memories`. Treat only a match as informative.
+
+**Query with the author's own words** — not because the search is literal-only, but
+because that is the phrasing both legs can match. Space search is hybrid, `vector ∪
+literal` (`search_memories_space/2`, `webapp/lib/mollow/mcp/memory_tools.ex:4531`,
+MOL-4777), so a paraphrase normally reaches the corpus — but the vector leg is not
+guaranteed: on an embedding failure `Mollow.Spaces.search_messages/5` degrades to the
+literal leg rather than to empty (`webapp/lib/mollow/spaces.ex:2838-2851`), silently. So
+a paraphrase can miss a row that is present.
+
+The `search_memories` *tool description* at `:278` still says literal-only and that a
+paraphrase "returns nothing there"; that text predates MOL-4777 and is stale — right
+about the degraded case by accident, wrong about the normal one.
+
+With a workspace-scoped credential there is no placement check at all. Read the
+`routing:` line as "the entries carried a `repo`", never as "they arrived". Closing the
+gap properly needs the import to report the destination it chose — the same change that
+would make `--repair` safe for a routed project.
+
+The hashes file is overwritten by the next `push`.
+
+Never pair `--repair` with `--all` (uploads every project, so it cannot honour an
+approval) or `--project` (routes, so it exits 3). Closing the gap properly needs the
+import to report the destination it chose; that is not built.
 
 `verify` is read-only and exits non-zero when anything is missing (usable in a
 hook or CI). `push` is idempotent — the server dedups. Target resolution
 precedence: `--env` > injected `$MOLLOW_MEMORY_URL`/`$MOLLOW_MEMORY_API_KEY` >
 `~/.mollow/selected-env` + keyfile > prod.
+
+### Push per project, or the entries land in the private workspace
+
+**Only a single-project scope can route.** `repo` is the destination map's key,
+and `--repo` is stamped on *every* extracted entry — so `--all` (which spans
+every project under the root) and `--dir` (which names a memory directory whose
+slug cannot be inverted to its project) have no single right answer. Rather than
+guess and route another project's memories into this repo's shared, undeletable
+Space, `push` sends them with no `repo` and **says so**:
+
+```
+routing: unresolved — --all spans every project, so no single `repo` can be
+  stamped; entries land in the private workspace. Re-run per project
+  (--project <repo-checkout>) to route them
+```
+
+Read that line. It is the one thing about a push the response body cannot tell
+you — `count: {ok, deduped, error}` looks identical whether the rows reached
+their Space or the private workspace. Until MOL-6187 `push` never passed `--repo`
+at all, so *every* entry it had ever sent landed private while reporting success.
+
+`--all verify` is unaffected: its diff keys on `content`, which `--repo` never
+touches.
+
+### `verify` and `--repair` refuse a routed scope
+
+`GET /api/memory/export` is **workspace-scoped** —
+`memory_export_controller.ex:174-178` filters `where: c.workspace_id ==
+^workspace_id`. A routed entry lands in a Space channel that query cannot return,
+so diffing against the export would report every correctly-routed entry as
+missing, and `--repair` would re-send the whole corpus on every run.
+
+So both refuse, with **exit 3** (distinct from `1` = genuinely missing and `0` =
+all present, because a confident wrong number is the thing being avoided):
+
+```
+memory-sync: cannot repair a routed scope.
+  Entries carry repo=github.com/mollowai/monorepo, so they land in that project's Space, but
+  GET /api/memory/export is WORKSPACE-scoped …
+```
+
+A plain `push` (no `--repair`) is unaffected — the import routes on `repo` and needs
+no read-back. Read-back for a routed entry needs `verify_stored_memory` with a
+`message_hash` the import returned.
+
+**The refusal is deliberately conservative.** A resolved `repo` means the entries
+*can* route, not that they do: `memory_destinations` is keyed `(user_id, repo)` and
+most projects have no row, so an unmapped project's entries land in the private
+workspace where the export would have seen them. Nothing client-side can tell the
+two apart — the destination map is not exposed and the import response does not say
+where a row went. So the trade is a false refusal against a false "N missing", and
+only the latter gets acted on by `--repair`. Use `--all` if you need the export path
+for such a project. Narrowing it properly needs the server to report the
+destination it chose; that is not built.
+
+### A timed-out chunk
+
+A push whose chunks time out prints `reposted: N`. A gateway 524 means the proxy
+stopped waiting, not that nothing landed (measured: a 524 at 125 s, and a re-post
+returned `deduped`), so each chunk is re-posted once.
+
+**What the re-post establishes is that the rows are present now** — not which
+attempt landed them. `deduped` only says the content hash is already stored, which
+an earlier sync could equally explain, so it cannot be read as proof the timed-out
+call committed.
 
 **Note:** every local memory currently syncs. Per-project / per-memory opt-out
 (so business/financial notes can stay local) is tracked in MOL-2708.
