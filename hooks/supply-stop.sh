@@ -147,7 +147,7 @@ fi
 # The uri is matched WHOLE, not as an 8-word run: a path chopped into word runs
 # matches any sibling path sharing a prefix, which is most of a corpus.
 match_used() {
-  local receipt="$1" ans="$2" tools="${3:-}"
+  local receipt="$1" ans="$2" tools="${3:-}" # tools: verified hashes, one per line
   printf '%s' "$receipt" | jq -c --arg answer "$ans" --arg tools "$tools" '
     def norm: ascii_downcase | gsub("[^a-z0-9]+"; " ") | ltrimstr(" ") | rtrimstr(" ");
     ($answer | norm) as $a
@@ -159,9 +159,15 @@ match_used() {
     # (Greptile, #6228). An ambiguous hash credits NEITHER, because the transcript
     # cannot say which record the model actually read.
     | ( reduce (.facts[]? | .verify_hash // "") as $h ({}; .[$h] = ((.[$h] // 0) + 1)) ) as $hcount
+    # `message_hash` / `content` are the receipt field names from BEFORE the
+    # normalisation to `citation_key` / `match_text`. A turn whose
+    # UserPromptSubmit ran the old hook and whose Stop runs this one holds that
+    # shape, and reading only the new names dropped its citations (Greptile,
+    # #6414). Same precedence the ground hook writes with: the new name first.
+    | ($tools | split("\n") | map(select(. != ""))) as $verified
     | [ .facts[]?
-        | .citation_key as $mh
-        | (.match_text // "") as $raw
+        | (.citation_key // .message_hash) as $mh
+        | ((.match_text // .content) // "") as $raw
         | (.verify_hash // "") as $vh
         | ($raw | norm) as $t
         | ($t | split(" ") | map(select(length > 0))) as $w
@@ -194,10 +200,16 @@ match_used() {
             # only use this mechanism is trying to count. An unverified fetch is
             # deliberately NOT credited: per plan-hash-pointer-demo.md §1 that is
             # retrieval with extra latency, not a checked use.
+            #
+            # MEMBERSHIP, not a substring. `$verified` is the exact `hash`
+            # argument of each verify that came back `match`. Searching the joined
+            # tool inputs for the hash credited any hash that appeared ANYWHERE in
+            # them — inside the `bytes` of a verify of a different entry, or in a
+            # tool that is not a verify at all (Greptile, #6414).
             (($vh // "") as $h
              | if $h == "" then empty
                elif (($hcount[$h] // 0) > 1) then empty
-               elif ($tools | contains($h)) then $mh
+               elif ($verified | index($h)) != null then $mh
                else empty end)
           elif $n == 0 then empty
           elif $n < 8 then
@@ -238,61 +250,104 @@ grounded_at="$(printf '%s' "$receipt" | jq -r '.grounded_at // 0' 2>/dev/null ||
 latency_ms=$(((now - grounded_at) * 1000))
 [ "$latency_ms" -ge 0 ] || latency_ms=0
 
-# ── Tool calls of THIS turn (pointer mode's evidence) ────────────────────────
-# Bounded by `grounded_at`, because the tail spans turns: a hash verified three
-# turns ago would otherwise credit this receipt when the model did nothing this
-# turn (Greptile, #6228). Transcript timestamps are ISO with fractional seconds,
-# which `fromdateiso8601` rejects, so the fraction is stripped before parsing.
-# A line with no parseable timestamp is DROPPED rather than kept: keeping it
-# restores the unbounded behaviour on exactly the lines we cannot place.
-tool_inputs=""
-if [ -n "$transcript_path" ] && [ -f "$transcript_path" ] && [ "$grounded_at" -gt 0 ]; then
-  tool_inputs="$(tail -n 500 "$transcript_path" 2>/dev/null | jq -rs --argjson since "$grounded_at" '
-    # Every block in the window, assistant and user alike: the tool_use lives on
-    # the assistant message and its tool_result on the following user message, so
-    # a filter on assistant-only never sees an outcome.
-    [ .[]
-      | select( (((.timestamp? // "") | tostring | sub("\\.[0-9]+Z$"; "Z"))
-                 | try fromdateiso8601 catch -1) >= $since )
-      | ((.message.content // .content) // empty)
-      | if type == "array" then .[] else empty end ] as $blocks
-    # A verify whose RESULT did not come back `match` is not evidence of use: the
-    # hash is in its INPUT either way, so reading inputs alone credited a pointer
-    # the check REFUTED (Greptile, #6228). Correlated by tool_use_id.
-    #
-    # `"match"` is tested WITH its quotes on purpose. Bare `match` is a substring
-    # of `mismatch`; `"match"` is not, because the quote lands on the `s`.
-    | ( [ $blocks[] | select((.type? // "") == "tool_result")
-          | select((.is_error? // false) | not)
-          # `content` comes back BOTH ways in the same transcript — a string and
-          # an array of text blocks (measured: 33 string, 1 array in one tail).
-          # `tostring` on the array escapes the inner quotes, so testing the
-          # stringified array misses every array-shaped result and silently drops
-          # a verified pointer (Greptile, #6228).
-          | ( (.content? // "")
-              | if type == "array" then ([ .[]? | (.text? // "") ] | join("\n"))
-                else tostring end ) as $rc
-          | select($rc | contains("\"match\""))
-          | (.tool_use_id? // "") ] | map(select(. != "")) ) as $ok
-    | [ $blocks[] | select((.type? // "") == "tool_use")
-        # `.id` is bound BEFORE the index call: inside `$ok | index(.id)` the
-        # argument is evaluated against $ok, not against the block, so it yields
-        # null and nothing ever matches — silently, with an empty result.
-        | (.id? // "") as $tid
-        | select(($ok | index($tid)) != null)
-        | (.input? // {} | tostring) ] | join("\n")
-    ' 2>/dev/null || true)"
+# ── Verified hashes of THIS turn (pointer mode's evidence) ───────────────────
+# The tail spans turns, so it has to be cut where this turn began: a hash
+# verified three turns ago would otherwise credit this receipt when the model
+# did nothing this turn (Greptile, #6228).
+#
+# The cut is `transcript_offset` — the transcript's size in bytes when
+# supply-ground.sh wrote the receipt, i.e. before this turn wrote anything.
+# Everything past it is this turn's; nothing before it is. It replaced
+# `grounded_at` as the bound because `grounded_at` is whole seconds and the
+# transcript's fractions had to be stripped to compare, so a verify in the same
+# second as the prompt — the end of the previous turn — passed `>=` (Greptile,
+# #6414). An offset past the end of the file means the file is not the one the
+# offset was taken on; nothing in it can be placed, so nothing is credited.
+#
+# A receipt with no offset (written before it existed, or with no transcript
+# path at prompt time) falls back to `grounded_at`, STRICTLY after: a line in
+# the grounding second cannot be put on either side of the prompt, so it is
+# dropped. That under-counts a verify made within a second of the prompt,
+# which is the direction this matcher is allowed to be wrong in. A line with no
+# parseable timestamp is dropped for the same reason.
+#
+# Lines are parsed one at a time (`fromjson?`), so one unparseable line — a
+# partial write at the boundary — costs that line, not the whole turn.
+verified_hashes=""
+transcript_offset="$(printf '%s' "$receipt" | jq -r '.transcript_offset // "" | tostring' 2>/dev/null || true)"
+case "$transcript_offset" in *[!0-9]*) transcript_offset="" ;; esac
+if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+  window=""
+  since=-1
+  if [ -n "$transcript_offset" ]; then
+    size="$(wc -c <"$transcript_path" 2>/dev/null | tr -d ' ' || echo 0)"
+    if [ "$transcript_offset" -le "${size:-0}" ]; then
+      window="$(tail -c +$((transcript_offset + 1)) "$transcript_path" 2>/dev/null | tail -n 500 || true)"
+    fi
+  elif [ "$grounded_at" -gt 0 ]; then
+    window="$(tail -n 500 "$transcript_path" 2>/dev/null || true)"
+    since="$grounded_at"
+  fi
+  if [ -n "$window" ]; then
+    verified_hashes="$(printf '%s\n' "$window" | jq -Rrn --argjson since "$since" '
+      [ inputs | fromjson? | objects
+        | select( $since < 0
+                  or ((((.timestamp? // "") | tostring | sub("\\.[0-9]+Z$"; "Z"))
+                       | try fromdateiso8601 catch -1) > $since) )
+        # Every block in the window, assistant and user alike: the tool_use
+        # lives on the assistant message and its tool_result on the following
+        # user message, so a filter on assistant-only never sees an outcome.
+        | ((.message.content // .content) // empty)
+        | if type == "array" then .[] else empty end ] as $blocks
+      # A verify whose RESULT did not come back `match` is not evidence of use:
+      # the hash is in its INPUT either way, so reading inputs alone credited a
+      # pointer the check REFUTED (Greptile, #6228). Correlated by tool_use_id.
+      #
+      # The result is PARSED and its top-level `outcome` read. A quoted-substring
+      # test for `"match"` also matched a MISMATCH, whose
+      # `dissenting_canonical_forms` carry `"outcome":"match"` for each form that
+      # did reproduce the digest (pointer_tools.ex render/1) — and matched any
+      # tool at all whose body said "match" (Greptile, #6414).
+      | ( [ $blocks[] | select((.type? // "") == "tool_result")
+            | select((.is_error? // false) | not)
+            # `content` comes back BOTH ways in the same transcript — a string
+            # and an array of text blocks (measured: 33 string, 1 array in one
+            # tail). Joining the array text first keeps the array shape
+            # parseable (Greptile, #6228).
+            | ( (.content? // "")
+                | if type == "array" then ([ .[]? | (.text? // "") ] | join("\n"))
+                  else tostring end ) as $rc
+            | select(($rc | try fromjson catch null) as $j
+                     | ($j | type) == "object" and $j.outcome == "match")
+            | (.tool_use_id? // "") ] | map(select(. != "")) ) as $ok
+      # Only the Mollow verify tool, and only the `hash` argument of that call.
+      # The full name, not the `__verify_fetched_bytes` suffix: a suffix let a
+      # same-named tool on another MCP server earn credit without the Mollow
+      # verifier running (Greptile, #6449). supply-ground.sh instructs this
+      # exact name, and `mollow-memory` is the server name every launcher
+      # injects. (No apostrophes in here: this is a single-quoted jq program.)
+      | [ $blocks[] | select((.type? // "") == "tool_use")
+          | select((.name? // "") == "mcp__mollow-memory__verify_fetched_bytes")
+          # `.id` is bound BEFORE the index call: inside `$ok | index(.id)` the
+          # argument is evaluated against $ok, not against the block, so it
+          # yields null and nothing ever matches — silently, with an empty result.
+          | (.id? // "") as $tid
+          | select(($ok | index($tid)) != null)
+          | (.input.hash? // empty) | select(type == "string" and . != "") ]
+      | unique | join("\n")
+      ' 2>/dev/null || true)"
+  fi
 fi
 
 # Which signal counts depends on the mode: facts mode reads the answer (the text
 # is Mollow's own, so a verbatim run is real evidence), pointer mode reads this
 # turn's tool calls (the bytes are the customer's, so only a verify call is).
 receipt_mode="$(printf '%s' "$receipt" | jq -r '.mode // "facts"' 2>/dev/null || echo facts)"
-if [ "$receipt_mode" = "pointer" ]; then evidence="$tool_inputs"; else evidence="$answer"; fi
+if [ "$receipt_mode" = "pointer" ]; then evidence="$verified_hashes"; else evidence="$answer"; fi
 
 used='[]'
 if [ -n "$evidence" ]; then
-  used="$(match_used "$receipt" "$answer" "$tool_inputs")"
+  used="$(match_used "$receipt" "$answer" "$verified_hashes")"
 fi
 
 # Omit used_fact_ids entirely when we have no reliable signal (unreadable

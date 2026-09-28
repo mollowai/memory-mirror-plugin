@@ -918,6 +918,180 @@ else
   fail "pointer stop: array-shaped mismatch must not credit" "log='$(cat "$CURL_LOG")'"
 fi
 
+# ptr_call <file> <id> <tool-name> <input-json> <result-text> [iso-ts] — appends
+# one tool_use and its tool_result. The fixtures above hold ONE verify of ONE
+# hash, so none of them can express a call whose bytes mention a second hash, a
+# non-verify tool, or a verify from the turn before.
+ptr_call() {
+  local out="$1" id="$2" name="$3" input="$4" result="$5"
+  local ts="${6:-$(date -u +%Y-%m-%dT%H:%M:%S.000Z)}"
+  jq -cn --arg id "$id" --arg n "$name" --argjson in "$input" --arg ts "$ts" \
+    '{timestamp:$ts,type:"assistant",message:{content:[{type:"tool_use",id:$id,name:$n,input:$in}]}}' >>"$out"
+  jq -cn --arg id "$id" --arg r "$result" --arg ts "$ts" \
+    '{timestamp:$ts,type:"user",message:{content:[{type:"tool_result",tool_use_id:$id,content:$r}]}}' >>"$out"
+}
+VERIFY_TOOL="mcp__mollow-memory__verify_fetched_bytes"
+
+# Greptile #6414 (supply-stop.sh:193): credit was a SUBSTRING test over every
+# successful call's joined input. A verify of A whose `bytes` happen to contain
+# B's hash credited B, which was never checked. Needs TWO supplied hashes with
+# only one verified — a one-hash fixture passes either way.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-XB"; mkdir -p "$rdir"
+ptr_receipt "$rdir" "g-xb-1" "rec-xa:HASH_XA" "rec-xb:HASH_XB"
+txb="$CASE/txb.jsonl"; : >"$txb"
+ptr_call "$txb" "tu_x" "$VERIFY_TOOL" '{"hash":"HASH_XA","bytes":"a manifest listing HASH_XB"}' '{"outcome":"match"}'
+ptr_transcript "$txb.tail" "" "Checked the first one."; cat "$txb.tail" >>"$txb"
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-XB\",\"transcript_path\":\"$txb\",\"stop_hook_active\":false}"
+if grep -q "rec-xa" "$CURL_LOG" && ! grep -q "rec-xb" "$CURL_LOG"; then
+  pass "pointer stop: a hash inside ANOTHER verify's bytes is not credited"
+else
+  fail "pointer stop: only the verify call's own hash is credited" "log='$(cat "$CURL_LOG")'"
+fi
+
+# Same finding, second half: any tool whose result contained `"match"` counted.
+# A fetch tool carrying the hash, answering with a `"match"` somewhere in its
+# body, is not a verify.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-NV"; mkdir -p "$rdir"
+ptr_receipt "$rdir" "g-nv-1" "rec-nv:HASH_NV"
+tnv="$CASE/tnv.jsonl"; : >"$tnv"
+ptr_call "$tnv" "tu_f" "mcp__fetch-files__fetch_file" '{"uri":"file:///c/rec-nv.txt","note":"HASH_NV"}' '{"outcome":"match"}'
+ptr_transcript "$tnv.tail" "" "Read it."; cat "$tnv.tail" >>"$tnv"
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-NV\",\"transcript_path\":\"$tnv\",\"stop_hook_active\":false}"
+if grep -q "g-nv-1" "$CURL_LOG" && ! grep -q "rec-nv" "$CURL_LOG"; then
+  pass "pointer stop: a NON-verify tool answering \"match\" does not credit"
+else
+  fail "pointer stop: only verify_fetched_bytes can credit" "log='$(cat "$CURL_LOG")'"
+fi
+
+# Greptile #6449: matching on the `__verify_fetched_bytes` SUFFIX let another MCP
+# server's same-named tool earn credit without Mollow's verifier ever running.
+# The grounding instructions name mcp__mollow-memory__verify_fetched_bytes, and
+# `mollow-memory` is the server name every launcher injects.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-OV"; mkdir -p "$rdir"
+ptr_receipt "$rdir" "g-ov-1" "rec-ov:HASH_OV"
+tov="$CASE/tov.jsonl"; : >"$tov"
+ptr_call "$tov" "tu_o" "mcp__other-server__verify_fetched_bytes" '{"hash":"HASH_OV","bytes":"x"}' '{"outcome":"match"}'
+ptr_transcript "$tov.tail" "" "Checked it."; cat "$tov.tail" >>"$tov"
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-OV\",\"transcript_path\":\"$tov\",\"stop_hook_active\":false}"
+if grep -q "g-ov-1" "$CURL_LOG" && ! grep -q "rec-ov" "$CURL_LOG"; then
+  pass "pointer stop: another server's verify_fetched_bytes does not credit"
+else
+  fail "pointer stop: only mollow-memory's verifier can credit" "log='$(cat "$CURL_LOG")'"
+fi
+
+# And the outcome is the TOP-LEVEL one. A named-form mismatch lists the forms
+# that DID reproduce the digest under `dissenting_canonical_forms`, each with
+# its own `"outcome":"match"` — pointer_tools.ex render/1. The quoted-substring
+# test read that as a match on a pointer the check refuted.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-DS"; mkdir -p "$rdir"
+ptr_receipt "$rdir" "g-ds-1" "rec-ds:HASH_DS"
+tds="$CASE/tds.jsonl"; : >"$tds"
+ptr_call "$tds" "tu_d" "$VERIFY_TOOL" '{"hash":"HASH_DS","bytes":"..."}' \
+  '{"outcome":"mismatch","hash":"HASH_DS","dissenting_canonical_forms":[{"canonical_form":"raw","outcome":"match"}]}'
+ptr_transcript "$tds.tail" "" "My form did not match."; cat "$tds.tail" >>"$tds"
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-DS\",\"transcript_path\":\"$tds\",\"stop_hook_active\":false}"
+if grep -q "g-ds-1" "$CURL_LOG" && ! grep -q "rec-ds" "$CURL_LOG"; then
+  pass "pointer stop: a MISMATCH with a dissenting matching form does not credit"
+else
+  fail "pointer stop: the top-level outcome decides, not a nested one" "log='$(cat "$CURL_LOG")'"
+fi
+
+# Greptile #6414 (supply-stop.sh:249): the turn was bounded by `grounded_at`, in
+# whole seconds, against transcript timestamps with the fraction stripped. A
+# verify at .400 of the grounding second, BEFORE the prompt, passed `>=`. The
+# fixture has to put the previous turn's verify INSIDE that second; the "2020"
+# case above is a different turn by years and passes under either bound.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-SS"; mkdir -p "$rdir"
+grd_iso="$(jq -rn --argjson t "$GRD" '$t | todate | sub("Z$"; "")')"
+tss="$CASE/tss.jsonl"; : >"$tss"
+ptr_call "$tss" "tu_p" "$VERIFY_TOOL" '{"hash":"HASH_SS","bytes":"..."}' '{"outcome":"match"}' "${grd_iso}.400Z"
+off="$(wc -c <"$tss" | tr -d ' ')"
+jq -cn --arg ts "${grd_iso}.900Z" '{timestamp:$ts,type:"user",message:{content:"next question"}}' >>"$tss"
+jq -cn --arg ts "${grd_iso}.950Z" '{timestamp:$ts,type:"assistant",message:{content:[{type:"text",text:"Answered without checking."}]}}' >>"$tss"
+jq -cn --argjson ts "$GRD" --argjson off "$off" '{grounding_id:"g-ss-1",grounded_at:$ts,transcript_offset:$off,mode:"pointer",facts:[
+  {citation_key:"rec-ss",match_text:"file:///c/ss.txt",verify_hash:"HASH_SS",relevance:0.9}]}' >"$rdir/g-ss-1.json"
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-SS\",\"transcript_path\":\"$tss\",\"stop_hook_active\":false}"
+if grep -q "g-ss-1" "$CURL_LOG" && ! grep -q "rec-ss" "$CURL_LOG"; then
+  pass "pointer stop: a verify BEFORE this prompt, in the same second, does not credit"
+else
+  fail "pointer stop: same-second previous-turn verify must not credit" "log='$(cat "$CURL_LOG")'"
+fi
+
+# The boundary cuts only BACKWARDS: a verify after the offset, in that same
+# second, is this turn's and still credits.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-SN"; mkdir -p "$rdir"
+tsn="$CASE/tsn.jsonl"
+jq -cn --arg ts "${grd_iso}.100Z" '{timestamp:$ts,type:"user",message:{content:"earlier question"}}' >"$tsn"
+off="$(wc -c <"$tsn" | tr -d ' ')"
+ptr_call "$tsn" "tu_n" "$VERIFY_TOOL" '{"hash":"HASH_SN","bytes":"..."}' '{"outcome":"match"}' "${grd_iso}.600Z"
+jq -cn --argjson ts "$GRD" --argjson off "$off" '{grounding_id:"g-sn-1",grounded_at:$ts,transcript_offset:$off,mode:"pointer",facts:[
+  {citation_key:"rec-sn",match_text:"file:///c/sn.txt",verify_hash:"HASH_SN",relevance:0.9}]}' >"$rdir/g-sn-1.json"
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-SN\",\"transcript_path\":\"$tsn\",\"stop_hook_active\":false}"
+if grep -q "rec-sn" "$CURL_LOG"; then
+  pass "pointer stop: a verify AFTER the offset credits, even in the grounding second"
+else
+  fail "pointer stop: this turn's verify must still credit" "log='$(cat "$CURL_LOG")'"
+fi
+
+# The Stop side is only half: the offset has to be WRITTEN at UserPromptSubmit,
+# as the transcript's size then, or the bound above never exists in real use.
+reset_case
+export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+cat >"$CASE/pointer-off.json" <<'JSON'
+{"grounding_id":"g-off-1","mode":"pointer","facts":[
+  {"citation_key":"rec-off","hash":"4444444444444444444444444444444444444444444444444444444444444444",
+   "locator":{"kind":"file","uri":"file:///corpus/off.txt","hash_version":"sha256"},
+   "canonical_form":"raw","title":"Off doc"}
+]}
+JSON
+export CURL_BODY_FILE="$CASE/pointer-off.json"
+tof="$CASE/tof.jsonl"; printf '%s\n' '{"type":"user","message":{"content":"hi"}}' '{"type":"assistant","message":{"content":"hello"}}' >"$tof"
+want_off="$(wc -c <"$tof" | tr -d ' ')"
+run_hook "supply-ground.sh" "{\"prompt\":\"q\",\"session_id\":\"sess-OFF\",\"cwd\":\"/tmp\",\"transcript_path\":\"$tof\"}"
+got_off="$(jq -r '.transcript_offset // "absent"' "$TMPDIR/mollow-supply/sess-OFF/g-off-1.json" 2>/dev/null || echo unreadable)"
+if [ "$got_off" = "$want_off" ]; then
+  pass "pointer ground: the receipt records the transcript's size at prompt time"
+else
+  fail "pointer ground: transcript_offset" "want=$want_off got=$got_off"
+fi
+
+# Greptile #6414 (supply-stop.sh:164): a receipt written by the hook BEFORE the
+# upgrade carries `message_hash` + `content`, not `citation_key` + `match_text`.
+# A turn that spans the upgrade must still be matched — the fixture has to be
+# in the OLD shape, which no receipt the current ground hook writes can be.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
+rdir="$TMPDIR/mollow-supply/sess-LEG"; mkdir -p "$rdir"
+jq -cn --argjson ts "$GRD" '{grounding_id:"g-leg-1",grounded_at:$ts,facts:[
+  {message_hash:"mh-legacy",content:"the deploy pipeline pins every base image by digest before release",relevance:0.9}]}' >"$rdir/g-leg-1.json"
+tlg="$CASE/tlg.jsonl"
+ptr_transcript "$tlg" "" "As noted, the deploy pipeline pins every base image by digest before release."
+run_hook "supply-stop.sh" "{\"session_id\":\"sess-LEG\",\"transcript_path\":\"$tlg\",\"stop_hook_active\":false}"
+if grep -q "mh-legacy" "$CURL_LOG"; then
+  pass "stop: a pre-upgrade receipt (message_hash + content) still credits its citation"
+else
+  fail "stop: legacy receipt fields must be read" "log='$(cat "$CURL_LOG")'"
+fi
+
 # ── an entry with NO form omits the token rather than emitting it empty ───────
 # `canonical_form=` with nothing after it reads as a value; the model passes ""
 # and the tool refuses it outright, which is strictly worse than omitting the

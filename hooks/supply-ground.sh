@@ -56,6 +56,7 @@ mm_ready || exit 0
 input="$(cat)"
 prompt="$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null || true)"
 session_id="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
+transcript_path="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
 # Blank-once-trimmed counts as empty. `[ -z ]` alone passes a whitespace-only
 # prompt, which the server then trims and refuses with 422 query_required — so
 # the hook spent its 2s budget to be told there was nothing to ground. Caught by
@@ -294,9 +295,28 @@ if mm_safe_component "$session_id" && mm_safe_component "$grounding_id"; then
   # match verbatim; the locator uri is used instead. It is weaker evidence and the
   # matcher treats it as such (see supply-stop.sh). `mode` is recorded so the Stop
   # hook does not have to infer which kind it is holding.
+  #
+  # `transcript_offset` is where THIS turn starts in the transcript: its size in
+  # bytes now, before the model has written anything for this prompt. The Stop
+  # hook reads pointer-mode evidence only past it. `grounded_at` could not draw
+  # that line — it is whole seconds, so a verify from the previous turn in the
+  # same second as this prompt landed inside it (Greptile, #6414). A byte offset
+  # has no resolution to lose and no clock to disagree with. A NAMED transcript
+  # that does not exist yet is offset 0: everything in it will be this turn's.
+  # NO path at all is `null`, never 0 — 0 would tell the Stop hook the whole
+  # file is this turn, previous turns included; null sends it to its fallback.
+  offset=null
+  if [ -n "$transcript_path" ]; then
+    offset=0
+    if [ -f "$transcript_path" ]; then
+      offset="$(wc -c <"$transcript_path" 2>/dev/null | tr -d ' ' || true)"
+      case "$offset" in '' | *[!0-9]*) offset=null ;; esac
+    fi
+  fi
   receipt="$(printf '%s' "$fresh" | jq -c \
-    --arg gid "$grounding_id" --arg mode "$mode" --argjson ts "$(date +%s)" '
-    { grounding_id: $gid, grounded_at: $ts, mode: $mode,
+    --arg gid "$grounding_id" --arg mode "$mode" --argjson ts "$(date +%s)" \
+    --argjson off "$offset" '
+    { grounding_id: $gid, grounded_at: $ts, transcript_offset: $off, mode: $mode,
       facts: [ .[]
                | { citation_key: (.citation_key // .message_hash),
                    match_text: (if (.citation_key // null) != null
