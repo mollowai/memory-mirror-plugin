@@ -92,6 +92,23 @@ reset_case() {
   # suite order-dependent and hid the contamination behind a passing run.
   unset MOLLOW_SUPPLY_MODE MOLLOW_SUPPLY_WORKSPACE_ID MOLLOW_SUPPLY_LIMIT
   unset MOLLOW_SUPPLY_POINTER_MODE CURL_STATUS
+  # File-backed credential resolution OFF by default here, and an EMPTY project
+  # root (MOL-6221). Both matter, for different reasons:
+  #
+  #   * several cases below buy "no key ⇒ no curl" by unsetting
+  #     MOLLOW_MEMORY_API_KEY. Once mm_ready can resolve a key from a file, that
+  #     purchase silently stops working — and it did: "ground: on but no API key
+  #     ⇒ mm_ready blocks the call" failed because the hook found the developer's
+  #     REAL key in the checkout's own .mcp.json.
+  #   * with no CLAUDE_PROJECT_DIR, mm_session_root falls back to
+  #     `git rev-parse --show-toplevel`, so the suite reads the working
+  #     checkout's real .session-config and .mcp.json. A test suite must never
+  #     be able to reach a live credential, whichever way this flag is set.
+  #
+  # The case that exercises resolution opts back in explicitly.
+  export MOLLOW_MEMORY_CREDS_FROM_FILES=0
+  export CLAUDE_PROJECT_DIR="$CASE/proj"
+  mkdir -p "$CLAUDE_PROJECT_DIR"
 }
 
 curl_called() { [ -s "$CURL_LOG" ]; }
@@ -175,6 +192,57 @@ if [ "$LAST_RC" -eq 0 ] && ! curl_called; then
   pass "ground: on but no API key ⇒ mm_ready blocks the call"
 else
   fail "ground: on but no API key ⇒ mm_ready blocks the call" "rc=$LAST_RC curl='$(cat "$CURL_LOG")'"
+fi
+
+# ── on, no key in the ENV, but one in .session-config: the call proceeds ──────
+# The MOL-6221 path. A worktree pane loses MOLLOW_MEMORY_API_KEY to direnv, so
+# the launcher writes it to .session-config; before this, mm_ready returned 1
+# with no message and the hook was silently inert for the life of the session.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+unset MOLLOW_MEMORY_API_KEY
+export MOLLOW_MEMORY_CREDS_FROM_FILES=1
+printf 'export MOLLOW_MEMORY_API_KEY=mol_fromsessionconfig\n' > "$CLAUDE_PROJECT_DIR/.session-config"
+ground_body
+run_hook "supply-ground.sh" '{"prompt":"hi","session_id":"s1","cwd":"/tmp"}'
+if [ "$LAST_RC" -eq 0 ] && curl_called; then
+  pass "ground: key from .session-config ⇒ the ground call proceeds"
+else
+  fail "ground: key from .session-config ⇒ the ground call proceeds" "rc=$LAST_RC curl='$(cat "$CURL_LOG")'"
+fi
+# And the resolved key is the one actually sent — resolution that finds a value
+# but does not reach the request would look identical to a hook that worked.
+if grep -q "mol_fromsessionconfig" "$CURL_LOG"; then
+  pass "ground: the .session-config key reaches the request"
+else
+  fail "ground: the .session-config key reaches the request" "log='$(cat "$CURL_LOG")'"
+fi
+
+# ── the machine-wide opt-in file turns supply mode on with NO env var ─────────
+# The only switch reachable for an already-running session, whose hook children
+# inherit an environ fixed at launch.
+reset_case
+unset MOLLOW_SUPPLY_MODE
+mkdir -p "$HOME/.mollow"
+printf 'on\n' > "$HOME/.mollow/supply-mode"
+ground_body
+run_hook "supply-ground.sh" '{"prompt":"hi","session_id":"s1","cwd":"/tmp"}'
+if [ "$LAST_RC" -eq 0 ] && curl_called; then
+  pass "ground: ~/.mollow/supply-mode=on ⇒ ON with no env var"
+else
+  fail "ground: ~/.mollow/supply-mode=on ⇒ ON with no env var" "rc=$LAST_RC curl='$(cat "$CURL_LOG")'"
+fi
+
+# An explicit `off` in the environment holds the machine-wide file down.
+reset_case
+export MOLLOW_SUPPLY_MODE=off
+mkdir -p "$HOME/.mollow"
+printf 'on\n' > "$HOME/.mollow/supply-mode"
+run_hook "supply-ground.sh" '{"prompt":"hi","session_id":"s1","cwd":"/tmp"}'
+if [ "$LAST_RC" -eq 0 ] && ! curl_called; then
+  pass "ground: env off beats supply-mode file on ⇒ no call"
+else
+  fail "ground: env off beats supply-mode file on ⇒ no call" "rc=$LAST_RC curl='$(cat "$CURL_LOG")'"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════

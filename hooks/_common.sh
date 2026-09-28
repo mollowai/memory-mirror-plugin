@@ -10,11 +10,34 @@
 # need an initialize→tools/call handshake per call (too slow for the per-prompt
 # recall hook).
 #
-# Config (injected into the session env by the monorepo's session launchers):
-#   MOLLOW_MEMORY_API_KEY  required — staging mol_* key. Absent => hooks no-op.
-#   MOLLOW_MEMORY_URL      the MCP url (…/mcp/v2). The API base is derived by
-#                          stripping the /mcp/v2 suffix. Public default = prod;
-#                          the monorepo overrides it to staging.
+# Config. Each value is read from the session environment FIRST and, when the
+# environment does not carry it, resolved from a file (MOL-6221) — because a
+# worktree pane loses these to direnv, and because the environment of an
+# already-running session cannot be changed at all:
+#
+#   MOLLOW_MEMORY_API_KEY       required. Absent => hooks no-op, silently.
+#                               Falls back to the session root's `.session-config`,
+#                               then the `mollow-memory` Authorization header in
+#                               that same directory's `.mcp.json`.
+#   MOLLOW_MEMORY_URL           the MCP url (…/mcp/v2). The API base is derived
+#                               by stripping the /mcp/v2 suffix. Same two
+#                               fallbacks, in the same order.
+#   MOLLOW_SUPPLY_MODE          supply-mode opt-in. Falls back to
+#                               `~/.mollow/supply-mode` (one word, absent ⇒ off).
+#   MOLLOW_SUPPLY_WORKSPACE_ID  which workspace a workspace-scoped key may read.
+#                               Falls back to `~/.mollow/supply-workspace-id`,
+#                               then `.session-config`. Without it a resolved key
+#                               still earns `400 workspace_not_named`.
+#   MOLLOW_MEMORY_CREDS_FROM_FILES=0  disables every file fallback above. Test
+#                               suites that buy "no key ⇒ no network" by unsetting
+#                               the key need this, or the purchase stops working.
+#
+# NOTE ON TARGET: this used to say the monorepo overrides the URL to staging. It
+# does not. `.mcp.json` in a host session points at https://mollow.ai/mcp/v2, so
+# `mm_env_label` resolves to **prod** and supply mode grounds against production.
+# Measured 2026-09-28 and confirmed as intended — the corpus worth grounding
+# against is prod's. Do not "restore" a staging default on the strength of the
+# old comment.
 
 set -uo pipefail
 
@@ -58,11 +81,175 @@ mm_env_label() {
   esac
 }
 
+# True when $1 is one of the tokens that mean "on". Leading/trailing whitespace
+# is trimmed first, because these values now also arrive from a hand-written
+# file where a stray space or a missing trailing newline is normal.
+mm_truthy() {
+  local v="${1:-}"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
+    1 | true | yes | on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# First line of $1, whitespace-trimmed. Absent, unreadable, or a DIRECTORY at
+# that path all print nothing rather than failing — these run inside hooks that
+# must never break a session.
+#
+# `read` returns non-zero on a final line with no trailing newline while still
+# HAVING SET the variable, so the `|| true` is load-bearing: `|| line=""` would
+# discard the very content read on that same call, and a one-word file with no
+# trailing newline is the common case here.
+mm_first_line_trimmed() {
+  local f="${1:-}" line=""
+  [ -n "$f" ] || return 0
+  [ -f "$f" ] || return 0
+  [ -r "$f" ] || return 0
+  IFS= read -r line < "$f" 2>/dev/null || true
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  printf '%s' "$line"
+}
+
+# Where the machine-wide supply-mode declaration lives. Mirrors
+# ~/.mollow/gate-mode, ~/.mollow/forge-mode and ~/.mollow/speak-level — one word,
+# absent ⇒ off.
+mm_supply_mode_file() {
+  printf '%s' "${MOLLOW_SUPPLY_MODE_FILE:-${HOME:-}/.mollow/supply-mode}"
+}
+
+# Whether credentials may be read from this session's own files. Default ON;
+# only an explicit false token disables it.
+#
+# The switch exists because several suites buy "nothing in this test reaches the
+# network" by unsetting MOLLOW_MEMORY_API_KEY (test-repo-identity.sh:26 says so
+# by name). File resolution voids that guarantee silently, which is the worst
+# possible way to lose it — so the guarantee stays purchasable.
+mm_creds_from_files_enabled() {
+  case "$(printf '%s' "${MOLLOW_MEMORY_CREDS_FROM_FILES:-1}" | tr '[:upper:]' '[:lower:]')" in
+    0 | false | no | off) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# The directory whose .session-config / .mcp.json describe THIS session.
+mm_session_root() {
+  if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "${CLAUDE_PROJECT_DIR}" ]; then
+    printf '%s' "${CLAUDE_PROJECT_DIR}"
+    return 0
+  fi
+  local top
+  top="$(git rev-parse --show-toplevel 2>/dev/null)" || top=""
+  printf '%s' "${top:-$PWD}"
+}
+
+# Fill MOLLOW_MEMORY_API_KEY / MOLLOW_MEMORY_URL from this session's own files
+# when the environment does not carry them (MOL-6221).
+#
+# ## Why a file path exists at all
+#
+# `host-session-start.sh` writes both into `.session-config` because direnv
+# reverts the monorepo's `.envrc` the moment a worktree pane's login zsh reaches
+# a prompt. When that write does not happen — an adopted worktree, a session
+# launched before persist_memory_env existed — `mm_ready` returns 1 with no
+# message and both supply hooks are silently inert. Measured on the `shop-watch`
+# session: its process environ held neither variable while `.mcp.json` carried
+# the credential the whole time. Two rails reading one secret from two places,
+# and only one of them got it.
+#
+# It is also the ONLY reachable switch for a session already running: the hooks
+# are children of a process whose environ was fixed at launch, so no amount of
+# exporting reaches them.
+#
+# ## Order, and why
+#
+# `.session-config` first: the launcher writes it for exactly this purpose and
+# chmods it 0600. `.mcp.json` second and opportunistically — it is MCP transport
+# config, not a credential store, and we are reading it because it happens to
+# hold the same key.
+#
+# Never echo a resolved value. A hook that leaks a bearer token into a
+# transcript is strictly worse than a hook that does nothing.
+mm_resolve_memory_creds() {
+  mm_creds_from_files_enabled || return 0
+  # Nothing to do only when ALL THREE inputs are already set. Short-circuiting on
+  # the key and url alone skips the workspace-id lookup below, and the request
+  # then goes out with no `x-mollow-workspace-id` and earns `400
+  # workspace_not_named` — the hook reaches the network and injects a refusal
+  # instead of facts, which is this file's own documented failure arriving from
+  # the other side. Found by Greptile on #6406; none of the workspace-id tests
+  # reached this branch, because each of them unset the key and url.
+  if [ -n "${MOLLOW_MEMORY_API_KEY:-}" ] && [ -n "${MOLLOW_MEMORY_URL:-}" ] &&
+    [ -n "${MOLLOW_SUPPLY_WORKSPACE_ID:-}" ]; then
+    return 0
+  fi
+
+  local root
+  root="$(mm_session_root)"
+  [ -n "$root" ] || return 0
+
+  local cfg="$root/.session-config"
+  if [ -f "$cfg" ] && [ -r "$cfg" ]; then
+    local v
+    if [ -z "${MOLLOW_MEMORY_API_KEY:-}" ]; then
+      # tail -1: a later line wins, matching how sourcing the file would behave.
+      v="$(sed -n 's/^[[:space:]]*export[[:space:]]\{1,\}MOLLOW_MEMORY_API_KEY=//p' "$cfg" 2>/dev/null | tail -1)"
+      v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+      if [ -n "$v" ]; then MOLLOW_MEMORY_API_KEY="$v"; export MOLLOW_MEMORY_API_KEY; fi
+    fi
+    if [ -z "${MOLLOW_MEMORY_URL:-}" ]; then
+      v="$(sed -n 's/^[[:space:]]*export[[:space:]]\{1,\}MOLLOW_MEMORY_URL=//p' "$cfg" 2>/dev/null | tail -1)"
+      v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+      if [ -n "$v" ]; then MOLLOW_MEMORY_URL="$v"; export MOLLOW_MEMORY_URL; fi
+    fi
+  fi
+
+  # MOLLOW_SUPPLY_WORKSPACE_ID is the THIRD input with the same problem, and
+  # without it a resolved key still gets `400 workspace_not_named` — the hook
+  # runs, reaches the server, and injects a refusal instead of facts. Measured on
+  # `shop-watch` immediately after the key started resolving. A one-value file
+  # beside supply-mode, then .session-config.
+  if [ -z "${MOLLOW_SUPPLY_WORKSPACE_ID:-}" ]; then
+    local ws
+    ws="$(mm_first_line_trimmed "${MOLLOW_SUPPLY_WORKSPACE_ID_FILE:-${HOME:-}/.mollow/supply-workspace-id}")"
+    if [ -z "$ws" ] && [ -f "$cfg" ] && [ -r "$cfg" ]; then
+      ws="$(sed -n 's/^[[:space:]]*export[[:space:]]\{1,\}MOLLOW_SUPPLY_WORKSPACE_ID=//p' "$cfg" 2>/dev/null | tail -1)"
+      ws="${ws%\"}"; ws="${ws#\"}"; ws="${ws%\'}"; ws="${ws#\'}"
+    fi
+    if [ -n "$ws" ]; then MOLLOW_SUPPLY_WORKSPACE_ID="$ws"; export MOLLOW_SUPPLY_WORKSPACE_ID; fi
+  fi
+
+  local mcp="$root/.mcp.json"
+  if [ -f "$mcp" ] && [ -r "$mcp" ] && command -v jq >/dev/null 2>&1; then
+    local auth url
+    if [ -z "${MOLLOW_MEMORY_API_KEY:-}" ]; then
+      auth="$(jq -r '.mcpServers["mollow-memory"].headers.Authorization // empty' "$mcp" 2>/dev/null)" || auth=""
+      # The header may or may not carry the scheme; a bare key is still a key.
+      auth="${auth#Bearer }"
+      auth="${auth#bearer }"
+      if [ -n "$auth" ]; then MOLLOW_MEMORY_API_KEY="$auth"; export MOLLOW_MEMORY_API_KEY; fi
+    fi
+    if [ -z "${MOLLOW_MEMORY_URL:-}" ]; then
+      url="$(jq -r '.mcpServers["mollow-memory"].url // empty' "$mcp" 2>/dev/null)" || url=""
+      if [ -n "$url" ]; then MOLLOW_MEMORY_URL="$url"; export MOLLOW_MEMORY_URL; fi
+    fi
+  fi
+  return 0
+}
+
 # Preconditions: a key, jq, and curl must be present, and MOLLOW_MEMORY_URL must
 # end in /mcp/v2 — else the hook no-ops. The suffix check is a security guard: a
 # misconfigured URL would otherwise send the mol_* key to `<full_url>/api/memory/*`
 # on whatever host the URL resolves to.
+#
+# Resolution runs FIRST and the guards run after it, never instead of it: a URL
+# arriving from `.mcp.json` is validated exactly like one from the environment.
+# Putting resolution after the checks would validate the default and then send to
+# whatever the file said.
 mm_ready() {
+  mm_resolve_memory_creds
   [ -n "${MOLLOW_MEMORY_API_KEY:-}" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   command -v curl >/dev/null 2>&1 || return 1
@@ -94,13 +281,21 @@ mm_ready() {
 # flag (which 404s the endpoint but only after the request has already been
 # made). Absent/anything-but-a-true-token => off. Kept here, not in each hook, so
 # the two hooks cannot drift on what "on" means.
+# Falls back to ~/.mollow/supply-mode when MOLLOW_SUPPLY_MODE is unset or EMPTY
+# (MOL-6221). Env wins in both directions when it says something: the launchers
+# and test-supply-hooks.sh set it, so a file that overrode them would break both,
+# and an explicit `off` in the environment must be able to hold a machine-wide
+# `on` down for one session.
+#
+# An empty-but-exported variable is not a decision — that is what a launcher
+# exporting a blank value looks like — so it falls through to the file rather
+# than silently disabling a declared machine mode.
 mm_supply_enabled() {
-  local v
-  v="$(printf '%s' "${MOLLOW_SUPPLY_MODE:-}" | tr '[:upper:]' '[:lower:]')"
-  case "$v" in
-    1 | true | yes | on) return 0 ;;
-    *) return 1 ;;
-  esac
+  local v="${MOLLOW_SUPPLY_MODE:-}"
+  if [ -z "$v" ]; then
+    v="$(mm_first_line_trimmed "$(mm_supply_mode_file)")"
+  fi
+  mm_truthy "$v"
 }
 
 # True when pointer mode is opted in for this machine. A SECOND opt-in on top of
