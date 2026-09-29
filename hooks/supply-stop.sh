@@ -169,9 +169,27 @@ fi
 # matches any sibling path sharing a prefix, which is most of a corpus.
 match_used() {
   local receipt="$1" ans="$2" tools="${3:-}" # tools: verified hashes, one per line
-  printf '%s' "$receipt" | jq -c --arg answer "$ans" --arg tools "$tools" '
+  # $ans can be arbitrarily large: facts mode now reads the WHOLE turn
+  # (uncapped — see the window comment above), and a long agentic turn's
+  # combined assistant text can exceed the OS's single-argument/exec limit.
+  # `--arg` puts it on jq's argv, so an oversized answer made jq fail to even
+  # start, and the `2>/dev/null` fallback silently dropped every citation in
+  # the turn (Greptile, #6483).
+  #
+  # Below this threshold, stay on `--arg` as before: no new dependency on a
+  # writable TMPDIR for the ordinary turn, and pointer mode's typically-tiny
+  # $tools never touches disk — unconditionally writing a temp file gave
+  # EVERY match a new failure mode (a full/unwritable TMPDIR) that never
+  # existed before, and one this small never needs (Greptile, #6483 round 3).
+  # 65536 is comfortably under the OS single-argument limit (1MiB+ on every
+  # platform this hook runs on) with room for jq's other argv/environment.
+  local jq_prog='
     def norm: ascii_downcase | gsub("[^a-z0-9]+"; " ") | ltrimstr(" ") | rtrimstr(" ");
     ($answer | norm) as $a
+    # Tags are matched on the LOWERCASED RAW answer, not the normalised one:
+    # `norm` strips the brackets, and without them `fact-1` is a prefix of
+    # `fact-12` — the whole bracketed token is what makes the match exact.
+    | ($answer | ascii_downcase) as $araw
     | (.mode // "facts") as $mode
     # How many entries carry each hash. Two pointer records with identical bytes
     # at different locators legitimately SHARE one hash and keep separate citation
@@ -190,6 +208,11 @@ match_used() {
         | (.citation_key // .message_hash) as $mh
         | ((.match_text // .content) // "") as $raw
         | (.verify_hash // "") as $vh
+        # Bound HERE, not read inline below: inside `$araw | contains(...)` the
+        # argument is evaluated against $araw (a string), so `.label` there
+        # raises and the whole matcher returns [] — the same scoping trap as the
+        # `$ok | index(.id)` note further down.
+        | ((.label // "") | ascii_downcase) as $lbl
         | ($raw | norm) as $t
         | ($t | split(" ") | map(select(length > 0))) as $w
         | ($w | length) as $n
@@ -232,6 +255,12 @@ match_used() {
                elif (($hcount[$h] // 0) > 1) then empty
                elif ($verified | index($h)) != null then $mh
                else empty end)
+          # Facts mode, explicit citation: the model wrote the tag this fact was
+          # shown under (supply-ground.sh). Checked before the verbatim run and
+          # credited on its own — a cited tag is the model saying it used the
+          # fact, which is what this count means. A receipt from before tags
+          # existed has no `label`, so a tag in the answer credits nothing there.
+          elif $lbl != "" and ($araw | contains("[" + $lbl + "]")) then $mh
           elif $n == 0 then empty
           elif $n < 8 then
             (if $a | contains($w | join(" ")) then $mh else empty end)
@@ -240,7 +269,41 @@ match_used() {
              | if any($sh[]; . as $s | $a | contains($s)) then $mh else empty end)
           end ]
     | unique
-    ' 2>/dev/null || printf '[]'
+    '
+  # BYTES, not characters: `${#ans}` counts characters under a UTF-8 locale,
+  # but the exec/kernel per-argument limit this threshold guards against is a
+  # byte limit. A turn built from enough multi-byte characters (CJK, emoji,
+  # accents) could stay under a character-counted threshold while its byte
+  # size was well over it, silently reintroducing the argv-limit failure round
+  # 2 fixed (Greptile, #6483 round 4). `wc -c` counts bytes regardless of
+  # locale.
+  local ans_bytes tools_bytes
+  ans_bytes="$(printf '%s' "$ans" | wc -c | tr -d ' ')"
+  tools_bytes="$(printf '%s' "$tools" | wc -c | tr -d ' ')"
+  if [ $((ans_bytes + tools_bytes)) -le 65536 ]; then
+    printf '%s' "$receipt" | jq -c --arg answer "$ans" --arg tools "$tools" "$jq_prog" 2>/dev/null || printf '[]'
+    return
+  fi
+
+  # Oversized: fall back to a file per value, read with `--rawfile` (no argv
+  # limit). A RETURN trap — not just the explicit `rm` below — covers a
+  # trappable interruption (SIGTERM/SIGINT) between here and the end of this
+  # function; nothing can save it from SIGKILL, an inherent limit of any
+  # temp-file use and no different from the rest of this codebase (Greptile,
+  # #6483 round 3).
+  local ans_file tools_file out rc
+  ans_file="$(mktemp "${TMPDIR:-/tmp}/mm-supply-answer.XXXXXX" 2>/dev/null)" || { printf '[]'; return; }
+  tools_file="$(mktemp "${TMPDIR:-/tmp}/mm-supply-tools.XXXXXX" 2>/dev/null)" || {
+    rm -f "$ans_file"
+    printf '[]'
+    return
+  }
+  trap 'rm -f "$ans_file" "$tools_file"' RETURN
+  printf '%s' "$ans" >"$ans_file"
+  printf '%s' "$tools" >"$tools_file"
+  out="$(printf '%s' "$receipt" | jq -c --rawfile answer "$ans_file" --rawfile tools "$tools_file" "$jq_prog" 2>/dev/null)"
+  rc=$?
+  if [ $rc -eq 0 ]; then printf '%s' "$out"; else printf '[]'; fi
 }
 
 now="$(date +%s)"
@@ -304,7 +367,12 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
   if [ -n "$transcript_offset" ]; then
     size="$(wc -c <"$transcript_path" 2>/dev/null | tr -d ' ' || echo 0)"
     if [ "$transcript_offset" -le "${size:-0}" ]; then
-      window="$(tail -c +$((transcript_offset + 1)) "$transcript_path" 2>/dev/null | tail -n 500 || true)"
+      # No `tail -n 500` here: the offset already bounds this to exactly this
+      # turn, so capping the line count on top of it drops the START of a long
+      # agentic turn instead of old turns. An early assistant message citing a
+      # fact fell outside that cap and was silently omitted from
+      # used_fact_ids even though it was cited this turn (Greptile, #6483).
+      window="$(tail -c +$((transcript_offset + 1)) "$transcript_path" 2>/dev/null || true)"
     fi
   elif [ "$grounded_at" -gt 0 ]; then
     window="$(tail -n 500 "$transcript_path" 2>/dev/null || true)"
@@ -365,6 +433,27 @@ fi
 # is Mollow's own, so a verbatim run is real evidence), pointer mode reads this
 # turn's tool calls (the bytes are the customer's, so only a verify call is).
 receipt_mode="$(printf '%s' "$receipt" | jq -r '.mode // "facts"' 2>/dev/null || echo facts)"
+
+# ── Facts mode reads the WHOLE turn, not only its last message ───────────────
+# An agentic turn cites a fact mid-turn — before a tool call — and ends on a
+# summary. Reading only the last assistant message missed those citations; it
+# was the other half of the 7-in-239. So when this turn's start is known by
+# byte offset (the same `window` the pointer path reads above), every assistant
+# text block past it is the answer. Only the offset bounds it: the whole-second
+# `grounded_at` fallback cannot place a line in the prompt's own second, so with
+# no offset the last-message read above stands.
+if [ "$receipt_mode" != "pointer" ] && [ -n "${window:-}" ] && [ "${since:-0}" -lt 0 ]; then
+  turn_answer="$(printf '%s\n' "$window" | jq -Rrn '
+    [ inputs | fromjson? | objects
+      | select((.type? // .role? // "") == "assistant")
+      | ((.message.content // .content) // "")
+      | if type == "string" then .
+        elif type == "array" then ([ .[]? | select((.type? // "") == "text") | (.text? // "") ] | join("\n"))
+        else "" end ]
+    | join("\n")
+    ' 2>/dev/null || true)"
+  [ -n "$turn_answer" ] && answer="$turn_answer"
+fi
 if [ "$receipt_mode" = "pointer" ]; then evidence="$verified_hashes"; else evidence="$answer"; fi
 
 used='[]'

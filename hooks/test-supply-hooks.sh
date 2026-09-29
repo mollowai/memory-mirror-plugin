@@ -64,6 +64,18 @@ exit 0
 SHIM_EOF
 chmod +x "$SHIM/curl"
 
+# A shim on `mktemp` too: it logs every invocation's argv to $MKTEMP_LOG (so a
+# test can assert whether match_used's file path was taken at all — cleanup
+# erases the FILE either way, but never erases the fact that it was created)
+# and then execs the real binary so behavior is unchanged.
+REAL_MKTEMP="$(command -v mktemp)"
+cat >"$SHIM/mktemp" <<SHIM_EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"\${MKTEMP_LOG:-/dev/null}"
+exec "$REAL_MKTEMP" "\$@"
+SHIM_EOF
+chmod +x "$SHIM/mktemp"
+
 # run_hook <script> <stdin-json> — runs a hook in a fresh sandbox with the curl
 # shim first on PATH. Exports the *_TEST_* vars the caller set beforehand.
 # Captures stdout to $LAST_OUT, exit code to $LAST_RC.
@@ -94,6 +106,8 @@ reset_case() {
   mkdir -p "$HOME" "$TMPDIR"
   export CURL_LOG="$CASE/curl.log"
   : >"$CURL_LOG"
+  export MKTEMP_LOG="$CASE/mktemp.log"
+  : >"$MKTEMP_LOG"
   unset CURL_BODY_FILE
   # A staging-shaped config so mm_ready passes when we want the ON path.
   export MOLLOW_MEMORY_URL="https://staging.mollow.ai/mcp/v2"
@@ -1380,6 +1394,267 @@ if printf '%s' "$LAST_OUT" | jq -e '.hookSpecificOutput.additionalContext | test
   pass "status: the status line is stripped from the body, not injected"
 else
   fail "status: status line leaked into the body" "out='$LAST_OUT'"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Explicit citation tags (facts mode) — the wording and the matcher, together
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The 8-word verbatim run credited 7 of 239 dogfood turns on Production: a model
+# that USES a fact rarely quotes eight words of it. So facts are now shown with a
+# tag and the model is asked to cite the tag; the matcher credits the tag OR the
+# verbatim run. These cases are the coupled pair — each ground-side case has a
+# stop-side case reading what it wrote.
+
+# ── ground: each fact is injected with its tag, and the receipt records it ────
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+ground_body
+run_hook "supply-ground.sh" '{"prompt":"how do releases work","session_id":"sess-TAG","cwd":"/tmp"}'
+CTX="$(printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext // ""' 2>/dev/null)"
+if printf '%s' "$CTX" | grep -qF -- '- [fact-1] Pinned release: ' \
+   && printf '%s' "$CTX" | grep -qF -- '- [fact-2] Test DB: ' \
+   && printf '%s' "$CTX" | grep -qiF 'cite its tag'; then
+  pass "tags: each fact is injected with its [fact-N] tag and a cite-by-tag instruction"
+else
+  fail "tags: injected context carries [fact-N] tags + instruction" "ctx='$CTX'"
+fi
+RECEIPT="$(find "$TMPDIR" -name 'g-abc-123.json' 2>/dev/null | head -1)"
+if [ -n "$RECEIPT" ] \
+   && [ "$(jq -r '[.facts[] | "\(.citation_key)=\(.label)"] | join(",")' "$RECEIPT")" = "mh-fact-one=fact-1,mh-fact-two=fact-2" ]; then
+  pass "tags: the receipt pairs each citation_key with the tag it was shown under"
+else
+  fail "tags: receipt labels" "receipt='$(cat "$RECEIPT" 2>/dev/null)'"
+fi
+
+# stop_case <session> <receipt-json> <transcript-lines…> — runs supply-stop.sh
+# and leaves the posted log in $POSTED.
+stop_case() {
+  local sess="$1" receipt="$2"
+  shift 2
+  export CURL_BODY_FILE="$CASE/outcome.json"
+  echo '{"status":"ok"}' >"$CASE/outcome.json"
+  local rdir="$TMPDIR/mollow-supply/$sess"
+  mkdir -p "$rdir"
+  local gid
+  gid="$(printf '%s' "$receipt" | jq -r .grounding_id)"
+  printf '%s' "$receipt" >"$rdir/$gid.json"
+  TP="$CASE/transcript-$sess.jsonl"
+  : >"$TP"
+  for line in "$@"; do printf '%s\n' "$line" >>"$TP"; done
+  run_hook "supply-stop.sh" "{\"session_id\":\"$sess\",\"transcript_path\":\"$TP\",\"stop_hook_active\":false}"
+  POSTED="$(cat "$CURL_LOG")"
+}
+asst() { jq -cn --arg t "$1" '{type:"assistant",message:{role:"assistant",content:[{type:"text",text:$t}]}}'; }
+usr() { jq -cn --arg t "$1" '{type:"user",message:{role:"user",content:[{type:"text",text:$t}]}}'; }
+TAGGED='{"grounding_id":"g-tag","grounded_at":100,"transcript_offset":0,"mode":"facts","facts":[
+ {"citation_key":"mh-one","label":"fact-1","match_text":"the staging deploy uses the pinned commit and skips the gate chain"},
+ {"citation_key":"mh-two","label":"fact-2","match_text":"the postgres test database is named mollow_test and lives in docker compose"}]}'
+
+# ── stop: a tag with NO verbatim run credits exactly that fact ────────────────
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+stop_case sess-T1 "$TAGGED" "$(usr "where do tests run")" "$(asst "Against mollow_test in compose [fact-2].")"
+if printf '%s' "$POSTED" | grep -q '"used_fact_ids":\["mh-two"\]'; then
+  pass "tags: a cited tag credits its fact with no verbatim run (mh-two only)"
+else
+  fail "tags: a cited tag credits its fact" "posted='$POSTED'"
+fi
+
+# ── stop: [fact-12] must not credit fact-1 — the tag is matched WHOLE ─────────
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+stop_case sess-T2 "$TAGGED" "$(usr "q")" "$(asst "See [fact-12] and [fact-21] for more.")"
+if printf '%s' "$POSTED" | grep -q '/grounding/v1/outcome' && ! printf '%s' "$POSTED" | grep -q 'used_fact_ids'; then
+  pass "tags: [fact-12] / [fact-21] credit nothing — no prefix match on a tag"
+else
+  fail "tags: tag must be matched whole" "posted='$POSTED'"
+fi
+
+# ── stop: tag case does not matter ───────────────────────────────────────────
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+stop_case sess-T3 "$TAGGED" "$(usr "q")" "$(asst "Use the pinned build [Fact-1].")"
+if printf '%s' "$POSTED" | grep -q '"used_fact_ids":\["mh-one"\]'; then
+  pass "tags: [Fact-1] credits fact-1 (case-insensitive)"
+else
+  fail "tags: case-insensitive tag" "posted='$POSTED'"
+fi
+
+# ── stop: a tag in an EARLIER assistant message of this turn counts ───────────
+# Agentic turns cite mid-turn and end on a summary. Reading only the last
+# assistant message was the other half of the 7-in-239.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+stop_case sess-T4 "$TAGGED" \
+  "$(usr "fix the release")" \
+  "$(asst "Checking the pinned build first [fact-1].")" \
+  "$(jq -cn '{type:"user",message:{role:"user",content:[{type:"tool_result",tool_use_id:"t1",content:"ok"}]}}')" \
+  "$(asst "Done — the release is out.")"
+if printf '%s' "$POSTED" | grep -q '"used_fact_ids":\["mh-one"\]'; then
+  pass "tags: a tag in an earlier assistant message of THIS turn is credited"
+else
+  fail "tags: mid-turn citation" "posted='$POSTED'"
+fi
+
+# ── stop: an early tag survives a turn longer than the 500-line tail window ───
+# Greptile #6483: the offset-bounded window was further cut with `tail -n 500`,
+# so an agentic turn producing more than 500 lines after the offset could push
+# an early citation out of the window this reader searches — dropping it from
+# used_fact_ids even though the model cited it this turn.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+FILLER=()
+for i in $(seq 1 600); do
+  FILLER+=("$(usr "filler turn $i")")
+done
+stop_case sess-T4B "$TAGGED" \
+  "$(asst "Checking the pinned build first [fact-1].")" \
+  "${FILLER[@]}" \
+  "$(asst "Done — the release is out.")"
+if printf '%s' "$POSTED" | grep -q '"used_fact_ids":\["mh-one"\]'; then
+  pass "tags: an early tag survives a turn longer than the 500-line tail window"
+else
+  fail "tags: early tag lost past the 500-line tail window" "posted='$POSTED'"
+fi
+
+# ── stop: an answer too large for argv still matches (via file, not exec arg) ─
+# Greptile #6483 (round 2): match_used passes the whole turn's answer to jq as
+# a `--arg`, i.e. a process argument. Facts mode now reads the WHOLE turn
+# (uncapped, per the fix above), so a long enough agentic turn's answer can
+# exceed the OS's single-exec argument limit — jq then fails to even start,
+# and the `|| printf '[]'` fallback silently drops every citation in the turn.
+# Built with printf/tr (no subprocess sees the big string as an argv) so the
+# test exercises supply-stop.sh's own argv use, not the harness's.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+BIG_TEXT="$(head -c 2000000 /dev/zero | tr '\0' 'a')"
+BIG_LINE='{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"'"$BIG_TEXT"' [fact-1]"}]}}'
+stop_case sess-T4C "$TAGGED" "$(usr "q")" "$BIG_LINE"
+if printf '%s' "$POSTED" | grep -q '"used_fact_ids":\["mh-one"\]'; then
+  pass "tags: an answer too large for argv still matches (passed via file, not an exec argument)"
+else
+  fail "tags: an oversized answer must still be matched" "posted='$POSTED'"
+fi
+
+# ── stop: an ordinary small turn never touches a temp file ────────────────────
+# Greptile #6483 (round 3): writing the answer to a temp file UNCONDITIONALLY
+# gave every match — including pointer mode's typically-tiny $tools, which
+# previously needed no filesystem at all — a new dependency on a writable
+# TMPDIR, and a receipt with no verbatim run before this would never have
+# touched disk. Only an answer large enough to risk the argv limit should.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+stop_case sess-T4D "$TAGGED" "$(usr "where do tests run")" "$(asst "Against mollow_test in compose [fact-2].")"
+if printf '%s' "$POSTED" | grep -q '"used_fact_ids":\["mh-two"\]' \
+   && ! grep -q 'mm-supply' "$MKTEMP_LOG"; then
+  pass "tags: an ordinary small turn matches without creating a temp file"
+else
+  fail "tags: ordinary turn must not touch a temp file" \
+    "posted='$POSTED'" "mktemp_log='$(cat "$MKTEMP_LOG")'"
+fi
+
+# ── stop: the oversized-answer path cleans up its temp files ──────────────────
+# The other half of round 3: if the Stop hook is interrupted between writing
+# the answer to its temp file and reaching `rm`, that file leaks — a long turn
+# can leave a large copy of its own text behind, and repeated interruptions
+# accumulate. This asserts the normal-completion path (a RETURN trap) cleans
+# up; an actual mid-flight interruption cannot be simulated portably here.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+BIG_TEXT2="$(head -c 2000000 /dev/zero | tr '\0' 'a')"
+BIG_LINE2='{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"'"$BIG_TEXT2"' [fact-1]"}]}}'
+stop_case sess-T4E "$TAGGED" "$(usr "q")" "$BIG_LINE2"
+if grep -q 'mm-supply' "$MKTEMP_LOG" \
+   && ! find "$TMPDIR" -maxdepth 1 -name 'mm-supply-*' 2>/dev/null | grep -q .; then
+  pass "tags: the oversized-answer path removes its temp files on normal completion"
+else
+  fail "tags: oversized-answer temp files must not leak" \
+    "mktemp_log='$(cat "$MKTEMP_LOG")'" "tmp='$(find "$TMPDIR" -maxdepth 1 -name 'mm-supply-*' 2>/dev/null)'"
+fi
+
+# ── stop: the size threshold counts BYTES, not characters (UTF-8) ─────────────
+# Greptile #6483 (round 4): bash's `${#var}` counts CHARACTERS under a UTF-8
+# locale, but the exec/kernel per-argument limit is a BYTE limit. A turn built
+# from enough multi-byte characters can stay under a character-counted
+# threshold while its byte size is well over it, so it silently stayed on the
+# argv path instead of being routed to the file-backed one — exactly the
+# argv-limit failure round 2 fixed, reintroduced for any non-ASCII answer.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+# `export LC_ALL=en_US.UTF-8` falls back to the shell's inherited locale
+# SILENTLY when that locale isn't installed (common on minimal CI images) —
+# glibc/bash print a warning but do not error. In that fallback, `${#ans}`
+# can end up counting BYTES, and the old character-counting bug would then
+# take the same (correct) file-backed path as the fix, passing whether or not
+# the regression is present. So verify the multibyte behavior actually landed
+# — on a 1-character 3-byte string, ${#} must read 1 — before trusting the
+# assertion below; search `locale -a` for one that truly does (Greptile,
+# #6483 round 5).
+CHAR=$'\xe4\xb8\xad' # U+4E2D ("中"), 3 bytes in UTF-8, 1 character
+UTF8_LOCALE=""
+for cand in en_US.UTF-8 en_US.utf8 C.UTF-8 C.utf8 $(locale -a 2>/dev/null | grep -i 'utf-\?8'); do
+  if [ "$(LC_ALL="$cand" bash -c 'a=$'"'"'\xe4\xb8\xad'"'"'; printf %s "${#a}"' 2>/dev/null)" = "1" ]; then
+    UTF8_LOCALE="$cand"
+    break
+  fi
+done
+if [ -z "$UTF8_LOCALE" ]; then
+  fail "tags: the size threshold is byte-based, not character-based (UTF-8 safe)" \
+    "no locale on this host makes bash count multibyte characters — this test cannot exercise the byte-vs-char distinction" \
+    "locale -a: $(locale -a 2>/dev/null | tr '\n' ' ')"
+else
+  export LC_ALL="$UTF8_LOCALE"
+  # 30,000 of the character above: 30,000 characters (under a 65536 CHARACTER
+  # threshold) but 90,000 bytes (over a 65536 BYTE threshold).
+  MULTIBYTE_TEXT="$(yes "$CHAR" | head -n 30000 | tr -d '\n')"
+  MULTIBYTE_LINE='{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"'"$MULTIBYTE_TEXT"' [fact-1]"}]}}'
+  stop_case sess-T4F "$TAGGED" "$(usr "q")" "$MULTIBYTE_LINE"
+  if printf '%s' "$POSTED" | grep -q '"used_fact_ids":\["mh-one"\]' \
+     && grep -q 'mm-supply' "$MKTEMP_LOG"; then
+    pass "tags: the size threshold is byte-based, not character-based (UTF-8 safe)"
+  else
+    fail "tags: a multibyte answer over the BYTE threshold must use the file path" \
+      "locale='$UTF8_LOCALE'" "posted='$POSTED'" "mktemp_log='$(cat "$MKTEMP_LOG")'"
+  fi
+fi
+
+# ── stop: a tag from the PREVIOUS turn (before transcript_offset) does not ────
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+PREV="$(usr "earlier question")
+$(asst "Earlier answer citing [fact-2].")"
+prev_bytes="$(printf '%s\n' "$PREV" | wc -c | tr -d ' ')"
+OFFSET_RECEIPT="$(printf '%s' "$TAGGED" | jq -c --argjson o "$prev_bytes" '.transcript_offset = $o | .grounding_id = "g-tag-prev"')"
+stop_case sess-T5 "$OFFSET_RECEIPT" \
+  "$(usr "earlier question")" "$(asst "Earlier answer citing [fact-2].")" \
+  "$(usr "new question")" "$(asst "Unrelated reply with no citation.")"
+if printf '%s' "$POSTED" | grep -q '/grounding/v1/outcome' && ! printf '%s' "$POSTED" | grep -q 'used_fact_ids'; then
+  pass "tags: a tag written before this turn's transcript_offset is not credited"
+else
+  fail "tags: previous-turn tag must not credit" "posted='$POSTED'"
+fi
+
+# ── stop: a receipt with NO labels (old ground hook) does not credit on a tag ─
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+UNLABELLED="$(printf '%s' "$TAGGED" | jq -c '.grounding_id = "g-old-shape" | .facts |= map(del(.label))')"
+stop_case sess-T6 "$UNLABELLED" "$(usr "q")" "$(asst "Against mollow_test in compose [fact-2].")"
+if ! printf '%s' "$POSTED" | grep -q 'used_fact_ids'; then
+  pass "tags: an unlabelled (pre-tag) receipt credits nothing from a tag it never showed"
+else
+  fail "tags: unlabelled receipt must not credit a tag" "posted='$POSTED'"
+fi
+
+# ── stop: the verbatim run still credits alongside a tag (union, no regression) ─
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+stop_case sess-T7 "$TAGGED" "$(usr "q")" \
+  "$(asst "The staging deploy uses the pinned commit and skips the gate chain; tests use [fact-2].")"
+if printf '%s' "$POSTED" | grep -q '"used_fact_ids":\["mh-one","mh-two"\]'; then
+  pass "tags: verbatim run (fact-1) and tag (fact-2) are both credited"
+else
+  fail "tags: verbatim + tag union" "posted='$POSTED'"
 fi
 
 echo

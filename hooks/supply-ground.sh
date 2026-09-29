@@ -259,9 +259,30 @@ if [ "$mode" = "pointer" ]; then
        ] | join("\n"))
     ' 2>/dev/null || true)"
 else
+  # ── Facts mode: each fact carries a TAG the model cites ────────────────────
+  # Crediting a fact on an 8-word verbatim run of its content credited 7 of 239
+  # dogfood turns on Production: a model that USES a fact rarely quotes eight
+  # words of it. So each fact is shown as `[fact-N]` and the model is asked to
+  # cite the tag where it relies on the fact; supply-stop.sh credits the tag OR
+  # the verbatim run.
+  #
+  # Coupling (top of file): this instruction asks the model to WRITE something,
+  # so it is a change to the matcher's input. Two consequences are designed in:
+  #
+  #   * "write a tag nowhere else" — naming a fact to say it was NOT used would
+  #     otherwise credit it (the MOL-5936 "NAME what you skipped" failure, from
+  #     the other side). It cannot be made impossible from here; it can be asked
+  #     against, and the matcher can only be as honest as the answer.
+  #   * The tag is `fact-N`, not a bare `F1`: a short bare token turns up in
+  #     ordinary text (function keys, footnotes, figure numbers), and a false
+  #     match OVER-credits — the one direction this matcher must not be wrong in.
+  #
+  # N is the 1-based position in `$fresh`, and the receipt below derives its
+  # `label` from the SAME ordering, so a tag can never name a different fact on
+  # the two sides.
   ctx="$(printf '%s' "$fresh" | jq -r '
-    "Facts from your memory that may bear on this request (surfaced by Mollow supply mode — use them if they apply, otherwise ignore):\n"
-    + ([ .[] | "- " + (.title // "fact") + ": " + (.content // "") ] | join("\n"))
+    "Facts from your memory that may bear on this request (surfaced by Mollow supply mode — use them if they apply, otherwise ignore). Each has a tag like [fact-1]. Where your answer relies on one, cite its tag inline at that point, e.g. \"… [fact-2]\". Cite only facts you actually used, and write a tag nowhere else — not even to say you did not use it.\n"
+    + ([ to_entries[] | "- [fact-" + ((.key + 1) | tostring) + "] " + (.value.title // "fact") + ": " + (.value.content // "") ] | join("\n"))
     ' 2>/dev/null || true)"
 fi
 
@@ -317,11 +338,16 @@ if mm_safe_component "$session_id" && mm_safe_component "$grounding_id"; then
     --arg gid "$grounding_id" --arg mode "$mode" --argjson ts "$(date +%s)" \
     --argjson off "$offset" '
     { grounding_id: $gid, grounded_at: $ts, transcript_offset: $off, mode: $mode,
-      facts: [ .[]
+      facts: [ to_entries[]
+               | .key as $i | .value
                | { citation_key: (.citation_key // .message_hash),
                    match_text: (if (.citation_key // null) != null
                                 then ((.locator.uri) // "")
                                 else (.content // "") end),
+                   # The tag this fact was SHOWN under — facts mode only, from the
+                   # same 1-based position the injected list uses. Pointer mode
+                   # shows no tags and credits on a verify call, so it has none.
+                   label: (if $mode == "facts" then "fact-" + (($i + 1) | tostring) else null end),
                    verify_hash: (.hash // null),
                    relevance: (.relevance // null) } ] }' 2>/dev/null || true)"
   if [ -n "$receipt" ]; then
