@@ -81,11 +81,32 @@ receipt_dir="${TMPDIR:-/tmp}/mollow-supply/${session_id}"
 # were never in this turn's context, and its latency would span multiple turns
 # (Greptile, PR #6160). So only the newest is correlated with this turn's answer
 # and posted; the rest are discarded, not matched against the wrong answer.
+#
+# NOTHING MAY REACH `ls` HERE, and the reason is not style (MOL-6325).
+# `"$receipt_dir"/*.json` is ONE word: a quoted prefix joined to an unquoted
+# glob. Under nullglob a glob that matches nothing removes the ENTIRE word,
+# quoted prefix included — it does not fall back to the prefix. So on the
+# ordinary "dir exists, no pending receipt" turn, `ls -t "$receipt_dir"/*.json`
+# became a bare `ls -t`, which lists the CURRENT DIRECTORY. This hook's cwd is
+# the worktree root, so `receipts` filled with the bare filenames of the user's
+# own files, the non-empty guard below passed on them, and the two `rm -f` sites
+# further down deleted every tracked root file of every worktree on the machine,
+# once per turn. (Directories survived `rm` without `-r`; dotfiles were never
+# listed by `ls` without `-a`. That is the whole of MOL-6199/6255/6271.)
+#
+# So the array is built by glob expansion, which cannot silently retarget, and
+# the newest is picked with bash's own `-nt` rather than by parsing `ls -t`.
 shopt -s nullglob
-receipts=()
-while IFS= read -r f; do receipts+=("$f"); done < <(ls -t "$receipt_dir"/*.json 2>/dev/null)
+receipts=("$receipt_dir"/*.json)
 shopt -u nullglob
 [ "${#receipts[@]}" -gt 0 ] || exit 0
+
+# Newest by mtime. `-nt` is a builtin file test, so there is no command to
+# expand arguments for, no output to parse, and no cwd to fall back to.
+newest="${receipts[0]}"
+for f in "${receipts[@]}"; do
+  [ "$f" -nt "$newest" ] && newest="$f"
+done
 
 # ── Answer text of the just-completed turn (for used_fact_ids only) ──────────
 # The last assistant message. Handle BOTH shapes the transcript permits: content
@@ -228,13 +249,14 @@ now="$(date +%s)"
 # reliable answer- or latency-correlation exists for them, and a misattributed
 # citation or a multi-turn latency would poison exactly the measurement this
 # feeds. Dropping a voluntary post-back is the benign outcome; faking one is not.
-for stale in "${receipts[@]:1}"; do
+for stale in "${receipts[@]}"; do
+  [ "$stale" = "$newest" ] && continue
   rm -f "$stale" 2>/dev/null || true
 done
 
 # The current turn's receipt (newest). Consume it up front so a mid-path failure
 # still leaves no receipt to be re-matched against a later turn's answer.
-current="${receipts[0]}"
+current="$newest"
 receipt="$(cat "$current" 2>/dev/null || true)"
 rm -f "$current" 2>/dev/null || true
 [ -n "$receipt" ] || exit 0

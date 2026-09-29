@@ -75,6 +75,17 @@ run_hook() {
   LAST_RC=$?
 }
 
+# Same, but from a chosen working directory. Claude Code runs a Stop hook with
+# the worktree ROOT as cwd, so any command in the hook that falls back to "the
+# current directory" acts on the user's own files. run_hook leaves cwd wherever
+# the suite happens to be, which cannot express that (MOL-6325) — a hook that
+# deleted its cwd would pass every case above.
+run_hook_cwd() {
+  local cwd="$1" script="$2" stdin="$3"
+  LAST_OUT="$(cd "$cwd" && printf '%s' "$stdin" | PATH="$SHIM:$PATH" bash "$DIR/$script" 2>/dev/null)"
+  LAST_RC=$?
+}
+
 reset_case() {
   CASE="$WORK/case-$RANDOM$RANDOM"
   mkdir -p "$CASE"
@@ -454,6 +465,40 @@ if [ "$LAST_RC" -eq 0 ] && ! curl_called; then
   pass "stop: no pending receipt ⇒ no post-back"
 else
   fail "stop: no pending receipt ⇒ no post-back" "curl='$(cat "$CURL_LOG")'"
+fi
+
+# ── an EXISTING but EMPTY receipt dir must delete NOTHING (MOL-6325) ─────────
+# The case above creates no receipt dir at all, so `[ -d "$receipt_dir" ]` exits
+# before the glob is ever expanded — it passes whether or not the glob is safe.
+# The destructive precondition is the dir EXISTING and holding no *.json: a turn
+# that grounded nothing. `"$receipt_dir"/*.json` is ONE word, so under nullglob a
+# glob matching nothing removes the whole word, quoted prefix included. Feed that
+# to `ls -t` and it runs with zero arguments, which lists the CURRENT DIRECTORY —
+# the worktree root — and every bare filename it returns is then `rm -f`ed.
+#
+# The fixture has to carry all three discriminators the incident showed, or it
+# cannot tell this bug from a working hook: regular files (rm -f takes them), a
+# directory (rm without -r refuses it), and a dotfile (ls without -a never lists
+# it). Assert the whole listing is byte-identical, not just that one file exists.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+rdir="$TMPDIR/mollow-supply/sess-NOGLOB"
+mkdir -p "$rdir" # exists — and deliberately holds no *.json
+root="$CASE/worktree-root"
+mkdir -p "$root/webapp"
+for f in package.json uv.lock ruff.toml mix.exs README.md; do
+  echo "a tracked root file" >"$root/$f"
+done
+echo "dotfiles survived the incident" >"$root/.gitignore"
+ROOT_BEFORE="$(ls -A "$root" | sort | tr '\n' ' ')"
+run_hook_cwd "$root" "supply-stop.sh" \
+  '{"session_id":"sess-NOGLOB","transcript_path":"/nope","stop_hook_active":false}'
+ROOT_AFTER="$(ls -A "$root" | sort | tr '\n' ' ')"
+if [ "$ROOT_BEFORE" = "$ROOT_AFTER" ] && [ "$LAST_RC" -eq 0 ] && ! curl_called; then
+  pass "stop: existing-but-empty receipt dir deletes nothing in the cwd"
+else
+  fail "stop: empty receipt dir must not touch the cwd" \
+    "before='$ROOT_BEFORE'" "after='$ROOT_AFTER'" "rc=$LAST_RC" "curl='$(cat "$CURL_LOG")'"
 fi
 
 # ── stale receipt is NOT attributed to this turn (Greptile PR #6160) ─────────
