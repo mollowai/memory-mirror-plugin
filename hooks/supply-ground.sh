@@ -19,6 +19,29 @@
 # server-side `supply_mode` flag only 404s AFTER the request is made.
 #
 #
+# ── Which COPY of this file runs, before you edit it ─────────────────────────
+# `plan-ipgp-hash-in-place-demo.md` §H warns that "the plugin resolves from the
+# marketplace path rather than a worktree — editing it in a worktree changes
+# nothing in a live session." Measured 2026-09-30, that is no longer the rule,
+# and the real one is launcher-dependent. Both readings produce the SAME
+# symptom — you edit, re-run, and see the old behaviour — so check rather than
+# assume:
+#
+#   * Through `scripts/claude-session` (which `scripts/dev/claude`,
+#     `claude-tmux`, `host-session-start.sh`, yolo and the forge agents all use)
+#     the session carries `--plugin-dir <that clone>/plugins/memory-mirror`. The
+#     WORKTREE copy is live and an edit lands on the next session, or in-session
+#     via `/reload-plugins`. All six claude processes on this machine were here.
+#   * Through a bare `claude`, `enabledPlugins` and the version-pinned
+#     `~/.claude/plugins/cache/` apply. On this machine that cache is a June copy
+#     holding no supply-ground.sh at all — so a bare session runs NO supply hook,
+#     which reads as "supply mode is broken" rather than "this launcher does not
+#     load the plugin".
+#
+# `preflight-supply.sh` answers it for you: it resolves the hook from the running
+# session's own argv and says out loud when the copy you are editing is not the
+# copy that ran.
+#
 # ── The wording and the matcher are ONE mechanism ────────────────────────────
 # Changing the injected text in supply-ground.sh changes what appears in the
 # transcript, which changes what supply-stop.sh can see. They move together or

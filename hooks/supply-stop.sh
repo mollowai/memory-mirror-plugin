@@ -16,6 +16,11 @@
 #
 # ── Blast radius / posture ───────────────────────────────────────────────────
 #
+# ── Which COPY of this file runs, before you edit it ─────────────────────────
+# Launcher-dependent, and both readings fail with the same symptom: you edit,
+# re-run, and see the old behaviour. `supply-ground.sh`'s header of the same name
+# holds the measured rule; `preflight-supply.sh` answers it for a given session.
+#
 # ── The wording and the matcher are ONE mechanism ────────────────────────────
 # Changing the injected text in supply-ground.sh changes what appears in the
 # transcript, which changes what supply-stop.sh can see. They move together or
