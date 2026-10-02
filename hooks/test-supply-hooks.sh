@@ -162,11 +162,30 @@ ptr_transcript() {
 
 
 # A canned facts-mode /ground response with two facts.
+#
+# EVERY FACT CARRIES `citation_key`, and that is the whole point of this fixture
+# rather than an incidental extra key (MOL-6563). `fact_wire/1` has put it on the
+# FACTS wire since MOL-6233 (operator ruling 2026-09-28), equal in value to
+# `message_hash` — so a fixture without it is a response shape the server has not
+# sent for days.
+#
+# It is load-bearing because the receipt builder's `match_text` branch USED to
+# read `citation_key` as "this is a pointer", and a pointer's text is its
+# `locator.uri`. With the key absent the builder took the facts branch, wrote the
+# content, and every citation case below passed — with the key present and the old
+# branch in place they go red, because `match_text` is written as "". That is the
+# bug this fixture now expresses: measured against prod, all 90 facts across all
+# 35 live receipts on the dogfood Mac had an empty `match_text`, so the 8-word
+# verbatim matcher could never fire and `used_fact_ids` was omitted on every
+# facts-mode turn.
+#
+# Do not drop `citation_key` to make a future case easier to write. Without it the
+# suite is green whether or not the projection is correct.
 ground_body() {
   cat >"$CASE/ground.json" <<'JSON'
 {"grounding_id":"g-abc-123","mode":"facts","facts":[
-  {"content":"The staging deploy uses the pinned commit and skips the gate chain entirely","verify_hash":"vh1","verify_hash_version":3,"verified":true,"relevance":0.91,"message_hash":"mh-fact-one","title":"Pinned release"},
-  {"content":"Postgres test database is named mollow_test and lives in docker compose","verify_hash":"vh2","verify_hash_version":3,"verified":true,"relevance":0.72,"message_hash":"mh-fact-two","title":"Test DB"}
+  {"citation_key":"mh-fact-one","content":"The staging deploy uses the pinned commit and skips the gate chain entirely","verify_hash":"vh1","verify_hash_version":3,"verified":true,"relevance":0.91,"message_hash":"mh-fact-one","title":"Pinned release"},
+  {"citation_key":"mh-fact-two","content":"Postgres test database is named mollow_test and lives in docker compose","verify_hash":"vh2","verify_hash_version":3,"verified":true,"relevance":0.72,"message_hash":"mh-fact-two","title":"Test DB"}
 ]}
 JSON
   export CURL_BODY_FILE="$CASE/ground.json"
@@ -306,6 +325,25 @@ if [ -n "$RECEIPT" ] \
   pass "ground: writes a receipt with grounding_id + each fact's citation_key"
 else
   fail "ground: writes a receipt with grounding_id + citation_keys" "receipt='$(cat "$RECEIPT" 2>/dev/null)'"
+fi
+# ── a facts receipt's match_text is the fact CONTENT (MOL-6563) ──────────────
+# Rendered through the real generator, because that is the only place this can be
+# observed: every citation case below hand-writes a receipt with `match_text`
+# already populated, so all of them pass against a builder that writes "". The
+# projection and the matcher are two halves of one mechanism and only this case
+# covers the first half for facts mode. (Pointer mode has had its equivalent all
+# along — "pointer: receipt carries citation_key + the locator uri as match_text".)
+#
+# Asserted as a NON-EMPTY exact value, not a substring: the failure mode is the
+# empty string, and `contains("")` is true of every string.
+if [ -n "$RECEIPT" ] \
+  && [ "$(jq -r '[.facts[] | select((.match_text // "") == "")] | length' "$RECEIPT")" = "0" ] \
+  && [ "$(jq -r '.facts[] | select(.citation_key == "mh-fact-one") | .match_text' "$RECEIPT")" \
+    = "The staging deploy uses the pinned commit and skips the gate chain entirely" ]; then
+  pass "ground: a facts receipt's match_text is the fact content, not an empty string"
+else
+  fail "ground: a facts receipt's match_text is the fact content, not an empty string" \
+    "match_texts=$(jq -c '[.facts[].match_text]' "$RECEIPT" 2>/dev/null)"
 fi
 
 # ── workspace id header passed when set ──────────────────────────────────────

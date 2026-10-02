@@ -364,7 +364,37 @@ if mm_safe_component "$session_id" && mm_safe_component "$grounding_id"; then
       facts: [ to_entries[]
                | .key as $i | .value
                | { citation_key: (.citation_key // .message_hash),
-                   match_text: (if (.citation_key // null) != null
+                   # Discriminated on `.locator`, which is the thing actually being
+                   # chosen between: the match_text of a pointer IS its locator uri.
+                   # (No apostrophes in this comment — single-quoted jq program.)
+                   #
+                   # It read `.citation_key != null` until MOL-6563, as a proxy for
+                   # "this is a pointer". That proxy died on 2026-09-28: MOL-6233
+                   # put `citation_key` on the FACTS wire too (`fact_wire/1`, equal
+                   # in value to `message_hash`) so a post-back could name a key
+                   # derived by one function. From that commit every facts-mode
+                   # fact took the pointer branch, and a facts fact has no
+                   # `.locator`, so `match_text` was written as "" — silently, on
+                   # every turn, for every caller.
+                   #
+                   # The consequence was not a missing field. The facts matcher in
+                   # `supply-stop.sh` is `$n == 0 then empty`, so the 8-word verbatim
+                   # run could never fire and `used_fact_ids` was omitted from
+                   # every facts-mode post-back — which records as "supplied, cited
+                   # nothing", indistinguishable from facts that went unused. The one
+                   # mechanism measuring whether supply mode helps reported that it
+                   # never does. Measured on the dogfood Mac 2026-10-02: 90 of 90
+                   # facts across all 35 live receipts had an empty match_text.
+                   #
+                   # `.locator` cannot drift the same way, for a structural reason
+                   # rather than a lucky one: `pointer_ready?/1` OMITS a pointer with
+                   # no locator, so presence of `.locator` is exactly the predicate
+                   # "is a pointer", and it is per-FACT rather than per-response —
+                   # which `mixed` mode (MOL-6103) needs, since it serves settled
+                   # facts and pointers in ONE grounding. Branching on `$mode` would
+                   # read correctly today and be wrong the moment this hook asks for
+                   # `mixed`.
+                   match_text: (if (.locator // null) != null
                                 then ((.locator.uri) // "")
                                 else (.content // "") end),
                    # The tag this fact was SHOWN under — facts mode only, from the
