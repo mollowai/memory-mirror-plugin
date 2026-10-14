@@ -33,6 +33,66 @@ repo="$(mm_repo_of "$cwd")"
 path="$(mm_path_of "$cwd")"
 source_project="$(basename "${cwd:-.}")"
 
+# 0) Who chose? An answer is only worth recording as "a decision the user just
+# made" when a person made it. The plugin cannot know whether anyone is at this
+# session's pane, so a host that can tell names a command for it:
+#
+#   MOLLOW_MEMORY_CAPTURE_GUARD   a command run as `<guard> <cwd>`. A relative
+#                                 path resolves against CLAUDE_PROJECT_DIR (else
+#                                 the session's cwd). Exit 0 means "nobody chose
+#                                 this — do not record it"; exit 1 means record.
+#                                 Any other outcome, including a guard that
+#                                 cannot be run or does not answer within
+#                                 MOLLOW_MEMORY_CAPTURE_GUARD_TIMEOUT seconds
+#                                 (default 2), records the answer and says so on
+#                                 stderr: a broken guard must not silently drop
+#                                 every decision an attended session makes, and a
+#                                 hung one must not spend the hook's whole budget.
+#
+# Unset, every answer is recorded, as before.
+guard="${MOLLOW_MEMORY_CAPTURE_GUARD:-}"
+if [ -n "$guard" ]; then
+  case "$guard" in
+    /*) ;;
+    *) guard="${CLAUDE_PROJECT_DIR:-${cwd:-.}}/$guard" ;;
+  esac
+  if [ -x "$guard" ]; then
+    # Bounded by hand: macOS ships no `timeout`. The guard runs in the
+    # background and is killed on overrun, which reads as 124 — "could not
+    # decide" — exactly like any other non-answer.
+    guard_limit="${MOLLOW_MEMORY_CAPTURE_GUARD_TIMEOUT:-2}"
+    "$guard" "${cwd:-$PWD}" </dev/null >/dev/null 2>&1 &
+    guard_pid=$!
+    guard_ticks=0
+    guard_killed=false
+    while kill -0 "$guard_pid" 2>/dev/null; do
+      if [ "$guard_ticks" -ge $((guard_limit * 10)) ]; then
+        kill -9 "$guard_pid" 2>/dev/null
+        guard_killed=true
+        break
+      fi
+      sleep 0.1
+      guard_ticks=$((guard_ticks + 1))
+    done
+    if wait "$guard_pid" 2>/dev/null; then guard_rc=0; else guard_rc=$?; fi
+    # Only the kill makes it a timeout. A guard that answered during the last
+    # tick answered, and its answer stands (Greptile P2, PR #6985).
+    [ "$guard_killed" = true ] && guard_rc=124
+  else
+    guard_rc=127
+  fi
+  case "$guard_rc" in
+    0)
+      echo "memory-mirror: not recording this answer as a decision — ${guard} reports nobody at this session chose it" >&2
+      exit 0
+      ;;
+    1) ;;
+    *)
+      echo "memory-mirror: capture guard ${guard} could not decide (exit ${guard_rc}); recording the answer" >&2
+      ;;
+  esac
+fi
+
 # 1) Structured form (only if tool_response is an object with .answers).
 pairs="$(jq -c '
   (.tool_response | if type == "object" then (.answers // null) else null end) as $ans
