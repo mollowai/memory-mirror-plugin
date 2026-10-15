@@ -194,7 +194,7 @@ fresh_count="$(printf '%s' "$fresh" | jq 'length' 2>/dev/null || echo 0)"
 #     `verify_fetched_bytes` needs WAS the re-encoding step 2 forbids. There was
 #     no reading of the instruction a model could follow on that lane.
 #   * The column list, its order, and the `::text` cast on each are a contract.
-#     The REGISTERING side is handed it by `GET /api/host-node/pointer-sources`;
+#     The REGISTERING side is handed it by `GET /api/pointers/v1/sources`;
 #     the model was handed a uri carrying a prefix and a row key and no columns
 #     at all. It had to independently arrive at all three, and without the casts
 #     `numeric` and `timestamptz` come back as JSON numbers, which the form
