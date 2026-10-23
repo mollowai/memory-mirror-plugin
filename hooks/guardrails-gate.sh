@@ -14,9 +14,11 @@
 #     POST /api/memory/guardrails/override (feeds the decompile/revise loop).
 #
 # Forward seam: per-workspace WayOfWorking rules distilled by MOL-2335 are fetched
-# by the SessionStart arm hook for the self-check checklist; per-tool server
-# evaluation (POST /guardrails/evaluate) is a deferred follow-up — the MVP runs
-# the local seed set so it works offline with zero per-tool latency.
+# by the SessionStart arm hook for the self-check checklist. Per-tool server
+# evaluation (POST /guardrails/evaluate) is wired behind MOLLOW_GUARDRAILS_SERVER_EVAL
+# and OFF by default (MOL-7848 spike): with the flag unset the per-call path does
+# zero network I/O, so it works offline with zero per-tool latency, as before.
+# With it on, every Bash|Write|Edit|MultiEdit call pays one round trip.
 #
 # Block contract (unchanged): print {decision:"block", reason} to stdout, exit 2.
 # Warn contract: print {hookSpecificOutput:{hookEventName,additionalContext}}, exit 0.
@@ -69,6 +71,64 @@ if [ -f "$DIR/guardrail-predicates-mollow.sh" ]; then
   # shellcheck source=/dev/null
   . "$DIR/guardrail-predicates-mollow.sh"
   WARN_LINES="$(mollow_guardrail_predicates "$TOOL_NAME" "$CMD" "$FILE_PATH" "$CONTENT" "$CWD" 2>/dev/null || true)"
+fi
+
+# ── Server evaluation (opt-in; MOL-7848) ──────────────────────────────────────
+# Ships the pending call to Mollow.Engram.Guardrails.evaluate/2 and merges its
+# warnings into WARN_LINES; a server :block lands in SERVER_BLOCK_LINES and
+# reaches the exit 2 below. The response is trusted only when it parses and says
+# ok:true as a single well-formed document — a non-2xx status, an HTML error
+# page, trailing garbage, a malformed warnings list, a timeout or no network all
+# leave both lists empty.
+#
+# Failure direction (BLD-032): this fails OPEN, and the cost it accepts is silent
+# under-reporting — an unreachable server means its rules are not checked and
+# nothing says so. The cost it refuses is failing a customer's tool call on a
+# network blip, which dominates for an advisory layer.
+SERVER_BLOCK_LINES=""
+if mm_truthy "${MOLLOW_GUARDRAILS_SERVER_EVAL:-}" && mm_ready; then
+  # The hook is killed at 5s (hooks.json), so an override may shorten the bound
+  # but never widen it past 2s; a non-integer falls back to 2.
+  SERVER_TIMEOUT="${MOLLOW_GUARDRAILS_SERVER_TIMEOUT:-2}"
+  case "$SERVER_TIMEOUT" in '' | *[!0-9]*) SERVER_TIMEOUT=2 ;; esac
+  [ "$SERVER_TIMEOUT" -ge 1 ] && [ "$SERVER_TIMEOUT" -le 2 ] || SERVER_TIMEOUT=2
+  # Not mm_post_read: the request travels on stdin (an argv body past the OS
+  # argument limit fails before curl runs, so a large Write would go unchecked),
+  # --max-filesize caps what jq must read, and the status rides after the body so
+  # only a 2xx is read. --fail alone would still pass a 3xx body through.
+  SERVER_RAW="$(printf '%s' "$INPUT" | jq -c '{tool_name, tool_input}' 2>/dev/null |
+    curl -sS --fail --max-time "$SERVER_TIMEOUT" --max-filesize 262144 \
+      -X POST "$(mm_api_base)/api/memory/guardrails/evaluate" \
+      -H "Authorization: Bearer ${MOLLOW_MEMORY_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -w '\n%{http_code}' \
+      --data-binary @- 2>/dev/null)" || SERVER_RAW=""
+  case "${SERVER_RAW##*$'\n'}" in
+    2[0-9][0-9]) SERVER_RESP="${SERVER_RAW%$'\n'*}" ;;
+    *) SERVER_RESP="" ;;
+  esac
+  # One TSV line per warning: severity, statement, provenance. @tsv escapes any
+  # tab or newline inside a server-supplied statement so it cannot split a line.
+  # -s plus `length == 1` and jq's own exit status make the parse all-or-nothing:
+  # jq prints a stream's first valid document before failing on the rest, so a
+  # block followed by an error page would otherwise be read as a block.
+  SERVER_LINES="$(printf '%s' "$SERVER_RESP" | jq -rs '
+    select(length == 1) | .[0] |
+    select(type == "object" and .ok == true and ((.warnings // []) | type) == "array") |
+    (.warnings // []) | if all(type == "object") then .[] else error("malformed") end |
+    [(.severity // "warn" | tostring),
+     (.statement // "" | tostring),
+     ("Mollow rule " + (.rule_hash // "?" | tostring)
+       + (if .matched_text then " — matched: " + (.matched_text | tostring | .[0:120]) else "" end))]
+    | @tsv' 2>/dev/null)" || SERVER_LINES=""
+  if [ -n "$SERVER_LINES" ]; then
+    SERVER_BLOCK_LINES="$(printf '%s\n' "$SERVER_LINES" | awk -F'\t' '$1 == "block"')"
+    SERVER_WARN_LINES="$(printf '%s\n' "$SERVER_LINES" | awk -F'\t' '$1 != "block" {OFS="\t"; $1 = "warn"; print}')"
+    if [ -n "$SERVER_WARN_LINES" ]; then
+      WARN_LINES="${WARN_LINES:+${WARN_LINES}
+}${SERVER_WARN_LINES}"
+    fi
+  fi
 fi
 
 # ── TDD :block predicate (the original gate, scoped to file edits) ─────────────
@@ -284,6 +344,21 @@ $(printf '%s\n' "$WARN_LINES" | awk -F'\t' 'NF>=2 {print "  • " $2}')"
     jq -n --arg r "$reason" '{decision: "block", reason: $r}'
     exit 2
   fi
+fi
+
+# A server :block has no bypass in the spike: the flag that enables the server
+# path is the only way past it.
+if [ -n "$SERVER_BLOCK_LINES" ]; then
+  reason="Blocked by a Mollow guardrail rule:
+$(printf '%s\n' "$SERVER_BLOCK_LINES" | awk -F'\t' 'NF>=2 {print "  • " $2 "\n    ↳ " $3}')"
+  if [ -n "$WARN_LINES" ]; then
+    reason="${reason}
+
+Also flagged (advisory):
+$(printf '%s\n' "$WARN_LINES" | awk -F'\t' 'NF>=2 {print "  • " $2}')"
+  fi
+  jq -n --arg r "$reason" '{decision: "block", reason: $r}'
+  exit 2
 fi
 
 # No block (or bypassed): surface any warnings as advisory context, then allow.
