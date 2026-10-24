@@ -64,9 +64,27 @@ if [ -n "$repo_root" ] && [ -d "${repo_root}/tmp" ] && [ ! -L "${repo_root}/tmp"
 fi
 
 # ── 1. Active ways-of-working → self-check checklist ──────────────────────────
+# Resolve the owner the same way the GATE does, by sending the project.
+#
+# Without this the two disagree whenever the rules are owned by a Space: the
+# server falls back to the workspace when no project is named, so the checklist
+# listed the user's own rules while the gate enforced the team's. Both calls
+# returned 200 and neither looked wrong — the session was shown one doctrine
+# and held to another.
+#
+# mm_project_of echoes the repository ("github.com/owner/name") or the directory
+# basename; empty outside a worktree, in which case we send no project and get
+# the old workspace behaviour rather than a malformed query.
+checklist_project="$(mm_project_of "${cwd:-$PWD}")"
+checklist_q=""
+if [ -n "$checklist_project" ]; then
+  checklist_q="?project=$(jq -rn --arg p "$checklist_project" '$p|@uri' 2>/dev/null || true)"
+  [ "$checklist_q" = "?project=" ] && checklist_q=""
+fi
+
 # Render at most a handful, :block first, each as one bullet. Empty list => "".
 checklist="$(
-  mm_get "/api/memory/guardrails" 3 | jq -r '
+  mm_get "/api/memory/guardrails${checklist_q}" 3 | jq -r '
     (.ways_of_working // [])
     | sort_by(if .severity == "block" then 0 else 1 end)
     | map("  • [" + (.severity // "warn") + "] " + (.statement // ""))

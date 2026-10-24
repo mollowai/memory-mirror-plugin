@@ -86,6 +86,7 @@ fi
 # nothing says so. The cost it refuses is failing a customer's tool call on a
 # network blip, which dominates for an advisory layer.
 SERVER_BLOCK_LINES=""
+SERVER_WARN_LINES=""
 if mm_truthy "${MOLLOW_GUARDRAILS_SERVER_EVAL:-}" && mm_ready; then
   # The hook is killed at 5s (hooks.json), so an override may shorten the bound
   # but never widen it past 2s; a non-integer falls back to 2.
@@ -96,7 +97,8 @@ if mm_truthy "${MOLLOW_GUARDRAILS_SERVER_EVAL:-}" && mm_ready; then
   # argument limit fails before curl runs, so a large Write would go unchecked),
   # --max-filesize caps what jq must read, and the status rides after the body so
   # only a 2xx is read. --fail alone would still pass a 3xx body through.
-  SERVER_RAW="$(printf '%s' "$INPUT" | jq -c '{tool_name, tool_input}' 2>/dev/null |
+  SERVER_RAW="$(printf '%s' "$INPUT" |
+    jq -c --arg project "$(mm_project_of "$CWD")" '{tool_name, tool_input, project: $project}' 2>/dev/null |
     curl -sS --fail --max-time "$SERVER_TIMEOUT" --max-filesize 262144 \
       -X POST "$(mm_api_base)/api/memory/guardrails/evaluate" \
       -H "Authorization: Bearer ${MOLLOW_MEMORY_API_KEY}" \
@@ -119,7 +121,9 @@ if mm_truthy "${MOLLOW_GUARDRAILS_SERVER_EVAL:-}" && mm_ready; then
     [(.severity // "warn" | tostring),
      (.statement // "" | tostring),
      ("Mollow rule " + (.rule_hash // "?" | tostring)
-       + (if .matched_text then " — matched: " + (.matched_text | tostring | .[0:120]) else "" end))]
+       + (if .matched_text then " — matched: " + (.matched_text | tostring | .[0:120]) else "" end)),
+     (.rule_hash // "" | tostring),
+     (.matched_text // "" | tostring | .[0:120])]
     | @tsv' 2>/dev/null)" || SERVER_LINES=""
   if [ -n "$SERVER_LINES" ]; then
     SERVER_BLOCK_LINES="$(printf '%s\n' "$SERVER_LINES" | awk -F'\t' '$1 == "block"')"
@@ -296,29 +300,68 @@ EOF
 # Record a bypassed :block as a guardrail override (DECISION event). Best-effort
 # and synchronous (a backgrounded curl can be SIGHUP-killed on hook exit); the
 # POST is sub-second against the 5s hook timeout.
-record_tdd_override() {
+# Record that someone proceeded past a rule. Args: hash, statement, severity,
+# matched text, reason.
+#
+# This took its rule as ARGUMENTS from MOL-7846 onward. It used to hardcode
+# `local:tdd-gate` in all five fields, so every record in the stream named the
+# same rule however many rules existed — which made the override count a count of
+# one rule's bypasses and made a per-rule retirement loop impossible to build on
+# top of. Pass the rule that actually fired.
+# How long the whole bypass-recording pass may take, and each request inside it.
+# The hook's own budget is what bounds these: the evaluate call above has
+# already spent some of it, and the tool call is blocked until this returns.
+BYPASS_RECORD_BUDGET_S="${MOLLOW_BYPASS_RECORD_BUDGET_S:-3}"
+BYPASS_RECORD_TIMEOUT_S="${MOLLOW_BYPASS_RECORD_TIMEOUT_S:-1}"
+
+record_override_for() {
   mm_ready || return 0
   local body
   body="$(jq -cn \
-    --arg rel "${BLOCK_REL:-}" --arg tool "$TOOL_NAME" --arg sid "$SESSION_ID" \
+    --arg hash "$1" --arg statement "$2" --arg severity "$3" \
+    --arg matched "$4" --arg reason "$5" \
+    --arg tool "$TOOL_NAME" --arg sid "$SESSION_ID" \
     --arg project "$(mm_project_of "$CWD")" '{
-      rule_hash: "local:tdd-gate",
-      rule_id: "local:tdd-gate",
-      statement: "TDD: write the failing test before implementation code",
-      severity: "block",
+      rule_hash: $hash,
+      rule_id: $hash,
+      statement: $statement,
+      severity: $severity,
       tool: $tool,
-      matched_text: $rel,
-      reason: "bypassed via tmp/.skip-tdd or SKIP_TDD",
+      matched_text: $matched,
+      reason: $reason,
       project: $project,
       session_id: $sid
     }' 2>/dev/null || true)"
-  [ -n "$body" ] && mm_post "/api/memory/guardrails/override" "$body" 3
+  [ -n "$body" ] && mm_post "/api/memory/guardrails/override" "$body" "${6:-3}"
+}
+
+record_tdd_override() {
+  record_override_for \
+    "local:tdd-gate" \
+    "TDD: write the failing test before implementation code" \
+    "block" \
+    "${BLOCK_REL:-}" \
+    "bypassed via tmp/.skip-tdd or SKIP_TDD"
 }
 
 # ── Decision ──────────────────────────────────────────────────────────────────
 bypass_active() {
   [ "${SKIP_TDD:-0}" = "1" ] && return 0
   [ -n "$REPO_ROOT" ] && [ -f "${REPO_ROOT}/tmp/.skip-tdd" ] && return 0
+  return 1
+}
+
+# The escape for a SERVER rule, deliberately not the TDD one. SKIP_TDD names a
+# specific rule; reusing it would mean switching off the test discipline to get
+# past an unrelated guardrail, and the record would then name the wrong reason.
+#
+# This exists because a block nobody can get past is a block that gets the whole
+# feature switched off the first time it is wrong — and then the rules stop
+# applying to everything, not just to the rule that misfired. Taking the escape
+# is recorded, so the bypass is data rather than a workaround.
+rules_bypass_active() {
+  mm_truthy "${SKIP_RULES:-}" && return 0
+  [ -n "$REPO_ROOT" ] && [ -f "${REPO_ROOT}/tmp/.skip-rules" ] && return 0
   return 1
 }
 
@@ -346,8 +389,83 @@ $(printf '%s\n' "$WARN_LINES" | awk -F'\t' 'NF>=2 {print "  • " $2}')"
   fi
 fi
 
-# A server :block has no bypass in the spike: the flag that enables the server
-# path is the only way past it.
+# Getting past a server :block. Each rule got past is recorded individually, by
+# hash — one record per rule, because the retirement loop decides per rule and a
+# single lumped record would retire all of them or none.
+# An explicit bypass is the only moment a rule's evidence is worth recording,
+# and it is worth recording for EVERY rule that fired — not only the ones that
+# stopped the call.
+#
+# Blocks alone would mean a warn-severity rule could never accumulate a single
+# escape, and warn is the default severity, so the retirement loop would be dead
+# for almost every rule that exists. Found by an adversarial pass, not by the
+# tests: a fixture that records overrides directly cannot see that the gate
+# never calls the recorder.
+#
+# A warning on its own is still NOT evidence. This repository's own finding is
+# that "a warning is never overridden" — so treating every warning as a
+# disagreement would retire every rule after three firings. The signal is
+# narrower and honest: somebody said "I know, let me through" WHILE it fired.
+#
+# Recording is bounded, because this is a hook and the call it gates is waiting.
+# Each POST is a separate request, so N rules bypassed on one call meant N
+# round trips in series — past the hook's budget the later ones are killed
+# mid-flight, which undercounts exactly the rules that fire together and biases
+# retirement toward never firing. So: a shared deadline, a short per-request
+# timeout, and anything dropped is SAID rather than lost. A silent cap here
+# would read as "those rules were never bypassed".
+if rules_bypass_active; then
+  _escaped="$(printf '%s\n%s' "${SERVER_BLOCK_LINES:-}" "${SERVER_WARN_LINES:-}")"
+  _deadline=$((SECONDS + BYPASS_RECORD_BUDGET_S))
+  _dropped=0
+  while IFS=$'\t' read -r _sev _stmt _prov _hash _matched; do
+    [ -n "${_hash:-}" ] || continue
+    if [ "$SECONDS" -ge "$_deadline" ]; then
+      _dropped=$((_dropped + 1))
+      continue
+    fi
+    # Re-read the text from the ORIGINAL JSON rather than from the TSV line,
+    # keeping the TSV path's 120-character bound.
+    #
+    # The bound is not cosmetic. `matched_text` on a Write or Edit can be the
+    # whole matching body — ~140 KiB — and `mm_post` passes its payload as a
+    # `curl -d` ARGUMENT, where Linux caps a single argument at 128 KiB
+    # (MAX_ARG_STRLEN, 32 pages). Over that, curl never runs, `mm_post` swallows
+    # the failure with `|| true`, and the bypass leaves NO record and counts
+    # toward nothing. The first version of this re-read dropped the bound the
+    # TSV had, which reintroduced exactly that (Greptile, #7410).
+    #
+    # 120 characters of the ORIGINAL bytes beats 120 characters of escaped ones,
+    # which is the whole point of reading from the JSON.
+    #
+    # jq's @tsv escapes tab, newline, CR and backslash, and `read -r` leaves
+    # those escapes as literal two-character sequences. A command containing a
+    # backslash — a regex like `\s`, or a line continuation — would be recorded
+    # with different bytes than the ones that actually fired the rule, which
+    # defeats the point of the record being evidence (Greptile, #7410).
+    #
+    # Unescaping by hand is the wrong fix: after the fact `\\n` and `\n`
+    # are indistinguishable. Going back to the JSON sidesteps the
+    # ambiguity entirely. Falls back to the TSV value if the lookup comes back
+    # empty, so a malformed response still records something.
+    _exact_stmt="$(printf '%s' "$SERVER_RESP" | jq -r --arg h "$_hash" \
+      '[.warnings[]? | select((.rule_hash // "" | tostring) == $h)][0].statement // ""' 2>/dev/null || true)"
+    _exact_matched="$(printf '%s' "$SERVER_RESP" | jq -r --arg h "$_hash" \
+      '[.warnings[]? | select((.rule_hash // "" | tostring) == $h)][0].matched_text // "" | .[0:120]' 2>/dev/null || true)"
+
+    record_override_for "$_hash" "${_exact_stmt:-${_stmt:-}}" "${_sev:-warn}" \
+      "${_exact_matched:-${_matched:-}}" \
+      "proceeded past it via tmp/.skip-rules or SKIP_RULES" "$BYPASS_RECORD_TIMEOUT_S"
+  done <<<"$_escaped"
+  if [ "$_dropped" -gt 0 ]; then
+    printf 'mollow guardrails: %d bypass record(s) not sent — %ss budget spent. Those rules will undercount toward retirement.\n' \
+      "$_dropped" "$BYPASS_RECORD_BUDGET_S" >&2
+  fi
+  # The warnings are still SHOWN below: recording a disagreement is not a reason
+  # to hide what was disagreed with.
+  SERVER_BLOCK_LINES=""
+fi
+
 if [ -n "$SERVER_BLOCK_LINES" ]; then
   reason="Blocked by a Mollow guardrail rule:
 $(printf '%s\n' "$SERVER_BLOCK_LINES" | awk -F'\t' 'NF>=2 {print "  • " $2 "\n    ↳ " $3}')"
