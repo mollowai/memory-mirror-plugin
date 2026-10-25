@@ -83,15 +83,36 @@ if [ -n "$checklist_project" ]; then
 fi
 
 # Render at most a handful, :block first, each as one bullet. Empty list => "".
+# Two things this must not do, both measured on 2026-10-24 (MOL-7736):
+#
+#   1. TRUNCATE SILENTLY. The cap renders the first 8 of however many the owner
+#      has. With 36 rules in a Space, 28 never reached a session and nothing
+#      said so — the reader saw eight bullets and no reason to think more
+#      existed. Raising the cap is not the fix (a corpus measured at ~0.7%
+#      precision makes 36 bullets worse than 8); SAYING SO is, because a reader
+#      who knows the list is partial can ask for the rest.
+#
+#   2. NAME THE WRONG CONTAINER. This said "for this workspace", and the
+#      project sent above is exactly what makes the server resolve a SPACE
+#      owner instead (Guardrails.owner_for/1). On 2026-10-24 all 36 rules came
+#      from the Mollow Internal Space while every session was told they were
+#      its workspace's. The response carries no owner field, so the honest fix
+#      is to claim neither — a wrong container is worse than no container.
+#      Naming it correctly needs the owner in the API response; not done here.
 checklist="$(
   mm_get "/api/memory/guardrails${checklist_q}" 3 | jq -r '
-    (.ways_of_working // [])
-    | sort_by(if .severity == "block" then 0 else 1 end)
-    | map("  • [" + (.severity // "warn") + "] " + (.statement // ""))
-    | .[0:8]
-    | if length > 0
-      then "Active ways-of-working for this workspace (self-check before acting):\n" + join("\n")
-      else "" end
+    (.ways_of_working // []) as $all
+    | ($all | length) as $n
+    | ($all
+       | sort_by(if .severity == "block" then 0 else 1 end)
+       | map("  • [" + (.severity // "warn") + "] " + (.statement // ""))
+       | .[0:8]) as $shown
+    | if $n == 0 then ""
+      else
+        "Active ways-of-working (self-check before acting"
+        + (if $n > ($shown | length) then "; showing \($shown | length) of \($n)" else "" end)
+        + "):\n" + ($shown | join("\n"))
+      end
   ' 2>/dev/null || true
 )"
 
