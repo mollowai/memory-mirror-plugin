@@ -49,7 +49,20 @@ if [ -n "$session_id" ] && [[ "$session_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
   [ -f "$marker" ] && exit 0
 fi
 
-reason="Reminder: call sync_session_context (mollow-memory MCP) before ending — summarize what was accomplished, key decisions, files changed, and lessons, using the project dir name + date as session_id. Pass project = the project dir BASENAME (not the repo URL): it is the scope the summary is filed under, and dedupe on session_id means a wrong scope cannot be corrected afterwards."
+# MOL-7196: the session_id the nudge names is this session's OWN id, taken from
+# the hook input, when there is one. That is the id the transcript is ingested
+# under, and so the id `SessionSummaryWorker` files its background summary
+# under. A sync under that id replaces the worker's summary and is what
+# get_session_context returns. A sync under an invented `<dir>-<date>` id never
+# meets the worker's row, and both summaries stay, with the worker's narrative
+# still attached to the transcript.
+if [ -n "$marker" ]; then
+  id_clause="using session_id \"${session_id}\" (this session's own id)"
+else
+  id_clause="using \$CLAUDE_CODE_SESSION_ID as session_id (fall back to the project dir name + date only when it is unset)"
+fi
+
+reason="Reminder: save durable findings with remember first, then call sync_session_context (mollow-memory MCP) before ending — summarize what was accomplished, key decisions, files changed, and lessons, ${id_clause}. Pass project = the project dir BASENAME (not the repo URL): it is the scope the summary is filed under, and re-syncing the same summary does not move it."
 
 # Record the nudge before emitting it so a follow-up stop won't repeat it. Best-
 # effort: if the marker can't be written we still nudge (a repeat reminder beats
