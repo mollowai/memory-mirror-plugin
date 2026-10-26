@@ -61,10 +61,30 @@ resp="$(printf '%s' "$resp" | jq -c --argjson seen "$seen_ids" '
 # what is present, and a malformed response yields empty output.
 ctx="$(printf '%s' "$resp" | jq -r '
   [
+    ( .proposed_answer as $p
+      | if $p == null then empty
+        else
+          "Engram proposes \"" + ($p.option // "?") + "\" here"
+          + (if $p.confidence then " (confidence " + ($p.confidence | tostring) else " (" end)
+          + (if (.count // 0) > 1 then ", from " + ((.count) | tostring) + " similar past decisions)"
+             elif (.count // 0) == 1 then ", from 1 similar past decision)"
+             else ")" end)
+          + ". That is the historical preference on record, not a settled answer. If your own"
+          + " reading of this request disagrees with it, say so and show BOTH voices rather than"
+          + " collapsing them: a surfaced disagreement is worth more than a single recommendation."
+        end ),
+    ( .unmapped_top_choice as $u
+      | if ($u == null or $u == "") then empty
+        else
+          "Engram found a nearby past decision, \"" + $u + "\", but it maps onto none of the"
+          + " options here, so it is NOT an answer to this question and carries no"
+          + " recommendation. It is a decision about a different question; treat Engram as"
+          + " having no usable view."
+        end ),
     ( (.past_decisions // []) as $ds
       | if ($ds | length) == 0 then empty
         else
-          "Relevant past decisions for this request (propose answers consistent with these unless the user signals otherwise):\n"
+          "Relevant past decisions for this request:\n"
           + ([ $ds[]
                 | "- " + (.question // "decision") + " -> chose " + (.chosen // "?")
                   + (if .rationale then " (" + .rationale + ")" else "" end) ]
