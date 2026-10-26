@@ -61,24 +61,41 @@ mm_supply_enabled || exit 0
 
 input="$(cat)"
 
+# Read BEFORE the guards below so every decline can name its session. MOL-7981:
+# a decline that cannot say which session it was in is countable but not
+# traceable, and the whole point of the note is to be followed back to a
+# transcript.
+session_id="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
+transcript_path="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
+
 # Re-entrancy guard: a Stop hook re-fires after Claude responds to it. If this
 # stop was itself triggered by a stop hook, end instead of looping. (No
 # once-per-session marker — every turn's supply must be posted back.)
 if [ "$(printf '%s' "$input" | jq -r '.stop_hook_active // false' 2>/dev/null || echo false)" = "true" ]; then
+  mm_supply_note reentrant "$session_id"
   exit 0
 fi
 
-mm_ready || exit 0
-
-session_id="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
-transcript_path="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
+mm_ready || {
+  mm_supply_note not_ready "$session_id"
+  exit 0
+}
 
 # No safely-pathable session id ⇒ no receipts to find. mm_safe_component rejects
 # `.`/`..`/`..`-sequences too, so the receipt dir can never resolve up a level.
-mm_safe_component "$session_id" || exit 0
+mm_safe_component "$session_id" || {
+  mm_supply_note bad_session_id "$session_id"
+  exit 0
+}
 
 receipt_dir="${TMPDIR:-/tmp}/mollow-supply/${session_id}"
-[ -d "$receipt_dir" ] || exit 0
+# No receipt DIR and no receipt IN it are different facts, so they are different
+# reasons: the first means this session never grounded a turn (or TMPDIR moved
+# under it), the second means it grounded and the receipt is gone.
+[ -d "$receipt_dir" ] || {
+  mm_supply_note no_receipt_dir "$session_id"
+  exit 0
+}
 
 # Pending receipts for this session, NEWEST FIRST. Normally exactly one — this
 # turn. More than one means an earlier turn's Stop hook did not fire and left a
@@ -104,7 +121,10 @@ receipt_dir="${TMPDIR:-/tmp}/mollow-supply/${session_id}"
 shopt -s nullglob
 receipts=("$receipt_dir"/*.json)
 shopt -u nullglob
-[ "${#receipts[@]}" -gt 0 ] || exit 0
+[ "${#receipts[@]}" -gt 0 ] || {
+  mm_supply_note no_receipt "$session_id"
+  exit 0
+}
 
 # Newest by mtime. `-nt` is a builtin file test, so there is no command to
 # expand arguments for, no output to parse, and no cwd to fall back to.
@@ -319,6 +339,11 @@ now="$(date +%s)"
 # feeds. Dropping a voluntary post-back is the benign outcome; faking one is not.
 for stale in "${receipts[@]}"; do
   [ "$stale" = "$newest" ] && continue
+  # Noted per receipt, with the grounding id it carries: each discard is one
+  # grounding that will never have an outcome row, and this is the only place
+  # that fact is knowable. The id is read before the unlink, not after.
+  mm_supply_note stale_discarded "$session_id" \
+    "$(jq -r '.grounding_id // empty' <"$stale" 2>/dev/null || true)"
   rm -f "$stale" 2>/dev/null || true
 done
 
@@ -327,10 +352,16 @@ done
 current="$newest"
 receipt="$(cat "$current" 2>/dev/null || true)"
 rm -f "$current" 2>/dev/null || true
-[ -n "$receipt" ] || exit 0
+[ -n "$receipt" ] || {
+  mm_supply_note empty_receipt "$session_id"
+  exit 0
+}
 
 grounding_id="$(printf '%s' "$receipt" | jq -r '.grounding_id // empty' 2>/dev/null || true)"
-[ -n "$grounding_id" ] || exit 0
+[ -n "$grounding_id" ] || {
+  mm_supply_note no_grounding_id "$session_id"
+  exit 0
+}
 
 # latency_ms is required and must be >= 0. We cannot observe the model call
 # (Claude Code makes it with the user's credential; Mollow is never in it), so
@@ -478,6 +509,53 @@ else
 fi
 
 # Fire-and-forget: post back best-effort. The receipt is already consumed above.
-[ -n "$payload" ] && mm_seam_post_read "/grounding/v1/outcome" "$payload" 2 >/dev/null 2>&1 || true
+#
+# The response was discarded until MOL-7981. It still does not change what the
+# hook DOES — a failed post-back is as lost as it ever was, because the receipt
+# is already gone — but the status is now recorded, which is the difference
+# between a measurable 37% and an unexplained one. `000` is curl's own code for
+# "no HTTP response happened" and is kept distinct from a real 4xx/5xx: one is
+# transient, the other answers identically every turn.
+if [ -n "$payload" ]; then
+  outcome_resp="$(mm_seam_post_read "/grounding/v1/outcome" "$payload" 2 2>/dev/null || true)"
+  outcome_code="$(mm_seam_split_status "$outcome_resp")"
+
+  case "$outcome_code" in
+    200)
+      # ── A 200 IS NOT PROOF THE ROW LANDED ──────────────────────────────────
+      # The endpoint fails OPEN on its own storage error: `Outcome.record/3`
+      # returns an unstored receipt when the write is lost
+      # (`outcome.ex:160-163`, and a second path at `:268`), and the controller
+      # still answers 200 carrying `"stored" => receipt.stored?`
+      # (`outcome_controller.ex:398`).
+      #
+      # So a server-side loss and a success are the SAME status code, and
+      # logging the status alone recorded the loss as `posted`. That is the
+      # exact failure this whole note exists to stop, inside the note itself —
+      # and it also refuted the claim that every remaining cause of the 37% is
+      # client-side (Greptile P1, #7502). `post_unstored` is its own reason.
+      #
+      # An unreadable or absent `stored` field is NOT read as false: a body this
+      # hook cannot parse is `posted:unknown_stored`, because treating "I could
+      # not tell" as "it did not store" would invent a server defect out of a
+      # shape change.
+      outcome_stored="$(
+        printf '%s' "$(mm_seam_split_body "$outcome_resp")" |
+          jq -r 'if type == "object" and has("stored") then (.stored | tostring) else "absent" end' \
+            2>/dev/null || printf 'absent'
+      )"
+      case "$outcome_stored" in
+        true) mm_supply_note posted "$session_id" "$grounding_id" ;;
+        false) mm_supply_note post_unstored "$session_id" "$grounding_id" ;;
+        *) mm_supply_note posted:unknown_stored "$session_id" "$grounding_id" ;;
+      esac
+      ;;
+    *)
+      mm_supply_note "post_failed:${outcome_code:-unknown}" "$session_id" "$grounding_id"
+      ;;
+  esac
+else
+  mm_supply_note no_payload "$session_id" "$grounding_id"
+fi
 
 exit 0

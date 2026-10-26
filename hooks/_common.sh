@@ -395,6 +395,141 @@ mm_seam_post_read() {
   printf '%s\n%s' "$code" "$payload"
 }
 
+# Record WHY this turn's outcome post-back did or did not happen (MOL-7981).
+#
+# ## The measurement that forced this
+#
+# Production, dogfood workspace, 2026-10-26: **37% of groundings never get an
+# outcome row**, and the share is flat at ~37% from one day old out to thirty.
+# It does not decay with age, so these are not in flight — a working hook would
+# have posted days ago. Splitting `no_outcome` from `claim_unrecorded`
+# (MOL-7976) put the whole gap on "the outcome row never arrived" and ruled the
+# matcher out entirely (`claim_unrecorded` is ZERO in production).
+#
+# Then the trail stopped, because `supply-stop.sh` exits 0 on seven distinct
+# paths after the opt-in guard and not one of them is observable. Three
+# hypotheses were tested against the database and two were refuted — the loss is
+# not session-terminal (39.3% in the under-2-minutes-to-next bucket, the largest
+# one) and not time-clustered (every day for thirty sits in a 25-48% band). The
+# third, that a later Stop discards the receipt, predicts the next grounding is
+# HEALTHY; measured, the next grounding is WORSE than base rate (55.1% against
+# 62.7%), so losses cluster rather than alternate. The remaining causes are all
+# client-side and the database cannot see any of them.
+#
+# ## Why a success is logged too
+#
+# A failure-only log is a numerator with no denominator: "47 declines" says
+# nothing without the turns that worked. So `posted` is recorded on the success
+# path, and the reason shares are readable from one file.
+#
+# ## What it is NOT
+#
+# Not reachable before the opt-in guard. Both supply hooks load into EVERY
+# Claude Code session on this machine, so a log that grows on every developer's
+# every turn is a cost paid by people who never asked for supply mode. The guard
+# is the caller's — `mm_supply_enabled || exit 0` runs first in both hooks — and
+# `test-supply-hooks.sh` pins that an opted-out session creates no file at all.
+#
+# Not joinable to the database for every reason. `grounding_id` is passed where
+# it is known, which is only after the receipt has been read; the two earliest
+# declines (`not_ready`, `bad_session_id`) are counted but cannot be matched to a
+# specific lost grounding. Moving the readiness check later would make them
+# joinable and was deliberately not done — it would reorder control flow in a
+# hook that loads everywhere, to buy a join that the reason SHARES already make
+# unnecessary for localising the 37%.
+#
+# Bounded, and rotated with `mv` only. Nothing in here reaches for `rm` with a
+# glob: this directory's own history is MOL-6199/6255/6271, where a glob that
+# matched nothing turned into a bare `ls` of the worktree root and the two `rm`
+# sites downstream deleted every tracked root file of every worktree on the
+# machine, once per turn.
+#
+# Always returns 0 and never writes to stderr, like every other helper here. A
+# diagnostic that can fail a turn is worse than no diagnostic.
+mm_supply_note() {
+  local reason="${1:-unknown}" session="${2:--}" grounding="${3:--}"
+  [ -n "${HOME:-}" ] || return 0
+
+  # Tabs and newlines are the record separators, so they cannot survive inside a
+  # field — a session id carrying one would otherwise forge an extra line.
+  reason="$(printf '%s' "$reason" | tr -d '\n\t')"
+  session="$(printf '%s' "$session" | tr -d '\n\t')"
+  grounding="$(printf '%s' "$grounding" | tr -d '\n\t')"
+
+  local dir="${HOME}/.mollow"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  local log="$dir/supply-stop-reasons.log"
+
+  # ── rotate and append under a lock, or two Stops erase the archive ─────────
+  # Every session on this machine shares one `$HOME`, so Stop hooks overlap.
+  # Without a lock both can read a size over the cap: the first moves the log to
+  # `.1` and appends to a fresh one, then the second moves THAT nearly-empty
+  # file over `.1` and the full archive is gone (Greptile, #7502).
+  #
+  # `mkdir` is the lock because it is atomic on every filesystem this runs on
+  # and needs no flock(1), which macOS does not ship. Bounded to ~250ms of
+  # waiting: a diagnostic must never delay a turn, so losing the race means
+  # appending without rotating — one oversized log — rather than blocking or
+  # skipping the record. A lock older than 60s is stale (its holder died
+  # mid-note) and is cleared, since nothing here can outlive that.
+  local lock="$dir/supply-stop-reasons.lock" held=""
+  local i=0
+  while [ "$i" -lt 25 ]; do
+    if mkdir "$lock" 2>/dev/null; then
+      held=1
+      break
+    fi
+    # NO `continue` HERE. It skipped the sleep AND the counter, so a stale lock
+    # that `rmdir` cannot remove — a read-only `~/.mollow`, or a lock owned by
+    # another user — made this loop spin FOREVER, in a function that runs on
+    # every Stop in every session. The sweep is an attempt, not a guarantee, so
+    # it costs an iteration like any other (Greptile, #7502).
+    if [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+      rmdir "$lock" 2>/dev/null || true
+    fi
+    sleep 0.01
+    i=$((i + 1))
+  done
+
+  # ── THE SIZE IS READ INSIDE THE LOCK, and that is the whole fix ────────────
+  # Reading it before acquiring does not work, and the first version of this
+  # function did: all three writers read 1048577, the first rotated and appended
+  # 41 bytes, and the second rotated THAT file over `.1` on its stale size. The
+  # archive went from 1 MiB to 41 bytes with the lock working perfectly.
+  # Measured — the overlapping-writers case in test-supply-hooks.sh fails
+  # without this line's position.
+  #
+  # `2>/dev/null` comes FIRST. Redirections are applied left to right, so in
+  # `wc -c <"$log" 2>/dev/null` the `<` is attempted while stderr is still the
+  # hook's own, and a missing log — EVERY first call — prints "No such file or
+  # directory" to it. A diagnostic whose first act is to write to the stream it
+  # promised never to touch is worse than no diagnostic (Greptile, #7502).
+  if [ -n "$held" ]; then
+    local size
+    size="$(wc -c 2>/dev/null <"$log" | tr -d ' ')" || size=0
+    case "$size" in '' | *[!0-9]*) size=0 ;; esac
+    if [ "$size" -gt 1048576 ]; then
+      mv -f "$log" "$log.1" 2>/dev/null || true
+    fi
+  fi
+
+  printf '%s\t%s\t%s\t%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${session:--}" "${grounding:--}" "${reason:--}" \
+    2>/dev/null >>"$log" || true
+
+  # `|| true` is load-bearing in an errexit caller, which this library has to
+  # survive: it is shared, and nothing stops a future `set -euo pipefail` script
+  # from sourcing it. Measured — with `held` set and `rmdir` failing (a holder
+  # that died mid-note leaving something inside the lock directory, so the
+  # directory is not empty), the bare form exits the shell 1 and `return 0` is
+  # never reached, breaking this function's documented always-returns-0
+  # invariant. The empty-`held` path is NOT affected: a failing left operand of
+  # `&&` is exempt from errexit, which is worth stating because it is the first
+  # thing a reader assumes is the trigger (Claude correctness reviewer, #7502).
+  [ -n "$held" ] && rmdir "$lock" 2>/dev/null || true
+  return 0
+}
+
 # The status line from an `mm_seam_post_read` result.
 mm_seam_split_status() { printf '%s' "${1%%$'\n'*}"; }
 

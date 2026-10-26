@@ -1695,6 +1695,363 @@ else
   fail "tags: verbatim + tag union" "posted='$POSTED'"
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════
+# supply-stop.sh — the decline reason is RECORDED (MOL-7981)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Measured on production 2026-10-26: 37% of groundings in the dogfood workspace
+# NEVER get an outcome row, steady across 30 days, and the share does not fall
+# with grounding age — so a working hook would have posted days ago. The split
+# of `no_outcome` from `claim_unrecorded` (MOL-7976) localised the whole gap to
+# "the outcome row never arrived", and then the trail stopped: this hook exits 0
+# on seven distinct paths after the opt-in guard and NONE of them is observable.
+# The cause is not in the database and cannot be put there.
+#
+# So the reason is written locally. These cases pin the two properties that make
+# the log usable, and the one that makes it safe:
+#
+#   * every decline names WHICH path, so the 37% can be attributed;
+#   * a SUCCESS is logged too — a failure-only log is a numerator with no
+#     denominator, and "47 declines" says nothing without the turns that worked;
+#   * with the opt-in unset NOTHING is written, because both hooks load into
+#     every session on the machine and a log that grows on every developer's
+#     every turn is a cost paid by people who never opted in.
+
+# Run "$@" with a deadline, without depending on GNU coreutils. `timeout` is
+# NOT on a stock macOS install — the one on this machine is
+# /opt/homebrew/bin/timeout, a Homebrew symlink — and these hooks run on macOS.
+# A bare `timeout` call returns 127 having run nothing, which an assertion that
+# only excludes 124 reads as a pass (Greptile, #7502). Same shape as
+# `run_with_timeout` in scripts/check-bridge-build-env.sh, and the same trap
+# scripts/claude-quota-state.sh records from Greptile P1 on #6564.
+#
+# Returns 124 on the deadline, like timeout(1), so a caller can tell a hang from
+# a failure.
+run_bounded() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; return $?; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
+
+  "$@" &
+  local pid=$! waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid"
+}
+
+reasons_log() { printf '%s' "$HOME/.mollow/supply-stop-reasons.log"; }
+reason_lines() { cat "$(reasons_log)" 2>/dev/null || true; }
+
+# ── opt-in unset ⇒ the log is never even created ─────────────────────────────
+# The isolation this asserts comes from `reset_case`, which points HOME at
+# "$CASE/home" (see its body above) — so `$(reasons_log)` is a path no earlier
+# case can have written. Named here because the guarantee is invisible from this
+# body alone, and `[ ! -e ... ]` against a shared HOME would be meaningless.
+reset_case
+rdir="$TMPDIR/mollow-supply/sess-NL"
+mkdir -p "$rdir"
+echo '{"grounding_id":"g-nl","grounded_at":100,"facts":[]}' >"$rdir/g-nl.json"
+run_hook "supply-stop.sh" '{"session_id":"sess-NL","transcript_path":"/nope","stop_hook_active":false}'
+if [ "$LAST_RC" -eq 0 ] && [ ! -e "$(reasons_log)" ]; then
+  pass "reasons: opt-in unset ⇒ no log file written at all"
+else
+  fail "reasons: opt-in unset must write nothing" "rc=$LAST_RC lines='$(reason_lines)'"
+fi
+
+# ── re-entrancy is recorded, not silent ──────────────────────────────────────
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+rdir="$TMPDIR/mollow-supply/sess-RE"
+mkdir -p "$rdir"
+echo '{"grounding_id":"g-re","grounded_at":100,"facts":[]}' >"$rdir/g-re.json"
+run_hook "supply-stop.sh" '{"session_id":"sess-RE","transcript_path":"/nope","stop_hook_active":true}'
+if printf '%s' "$(reason_lines)" | grep -q 'reentrant'; then
+  pass "reasons: re-entrant stop records 'reentrant'"
+else
+  fail "reasons: re-entrant stop" "lines='$(reason_lines)'"
+fi
+
+# ── no receipt directory is recorded ─────────────────────────────────────────
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+run_hook "supply-stop.sh" '{"session_id":"sess-ND","transcript_path":"/nope","stop_hook_active":false}'
+if printf '%s' "$(reason_lines)" | grep -q 'no_receipt_dir'; then
+  pass "reasons: missing receipt dir records 'no_receipt_dir'"
+else
+  fail "reasons: missing receipt dir" "lines='$(reason_lines)'"
+fi
+
+# ── a SUCCESS is recorded, so the declines have a denominator ────────────────
+# `stored: true` is what makes it a success. A 200 is not enough — see the
+# post_unstored case below.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+export CURL_BODY_FILE="$CASE/ok.json"
+echo '{"grounding_id":"g-ok","status":"ok","stored":true}' >"$CURL_BODY_FILE"
+rdir="$TMPDIR/mollow-supply/sess-OK"
+mkdir -p "$rdir"
+echo '{"grounding_id":"g-ok","grounded_at":100,"facts":[{"citation_key":"mh1","match_text":"alpha"}]}' >"$rdir/g-ok.json"
+run_hook "supply-stop.sh" '{"session_id":"sess-OK","transcript_path":"/nope","stop_hook_active":false}'
+if [ "$(cut -f4 "$(reasons_log)" 2>/dev/null)" = "posted" ]; then
+  pass "reasons: a stored post-back records exactly 'posted' (the denominator)"
+else
+  fail "reasons: successful post-back" "lines='$(reason_lines)' curl='$(cat "$CURL_LOG")'"
+fi
+
+# ── THE RECORD SHAPE, asserted field by field ───────────────────────────────
+# The first version of these cases only grepped for the reason WORD, so
+# dropping or swapping the id columns — or deleting the sanitizer — left them
+# green while breaking the documented joins (Greptile, #7502). The join is the
+# reason the grounding id is on the line at all, so it is asserted exactly.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+export CURL_BODY_FILE="$CASE/shape.json"
+echo '{"stored":true}' >"$CURL_BODY_FILE"
+rdir="$TMPDIR/mollow-supply/sess-SHAPE"
+mkdir -p "$rdir"
+echo '{"grounding_id":"g-shape-77","grounded_at":100,"facts":[{"citation_key":"mh1","match_text":"alpha"}]}' >"$rdir/g.json"
+run_hook "supply-stop.sh" '{"session_id":"sess-SHAPE","transcript_path":"/nope","stop_hook_active":false}'
+line="$(tail -1 "$(reasons_log)" 2>/dev/null || true)"
+nfields="$(printf '%s' "$line" | awk -F'\t' '{print NF}')"
+if [ "$nfields" = "4" ] &&
+  [ "$(printf '%s' "$line" | cut -f2)" = "sess-SHAPE" ] &&
+  [ "$(printf '%s' "$line" | cut -f3)" = "g-shape-77" ] &&
+  [ "$(printf '%s' "$line" | cut -f4)" = "posted" ] &&
+  printf '%s' "$line" | cut -f1 | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+  pass "reasons: the record is 4 tab-separated fields — ts, session, grounding, reason"
+else
+  fail "reasons: record shape" "fields=$nfields line='$line'"
+fi
+
+# ── a decline with no grounding id uses '-', not an empty field ─────────────
+# An empty third field would shift `cut -f4` onto nothing and silently break
+# every reason tally, so the placeholder is asserted rather than assumed.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+run_hook "supply-stop.sh" '{"session_id":"sess-DASH","transcript_path":"/nope","stop_hook_active":false}'
+line="$(tail -1 "$(reasons_log)" 2>/dev/null || true)"
+if [ "$(printf '%s' "$line" | awk -F'\t' '{print NF}')" = "4" ] &&
+  [ "$(printf '%s' "$line" | cut -f3)" = "-" ] &&
+  [ "$(printf '%s' "$line" | cut -f4)" = "no_receipt_dir" ]; then
+  pass "reasons: an unknown grounding id is '-' and the field count still holds"
+else
+  fail "reasons: dash placeholder" "line='$line'"
+fi
+
+# ── a session id carrying a TAB or NEWLINE cannot forge a record ────────────
+# Tabs and newlines are the separators, so an id containing one would write a
+# second line that every tally counts as a real decline. Removing the sanitizer
+# left the old assertions green.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+run_hook "supply-stop.sh" '{"session_id":"evil\tinjected\nsecond-line","transcript_path":"/nope","stop_hook_active":true}'
+if [ "$(grep -c "" "$(reasons_log)" 2>/dev/null || echo 0)" = "1" ] &&
+  [ "$(tail -1 "$(reasons_log)" | awk -F'\t' '{print NF}')" = "4" ]; then
+  pass "reasons: a tab/newline in the session id writes ONE 4-field record"
+else
+  fail "reasons: separator injection" \
+    "lines=$(grep -c "" "$(reasons_log)" 2>/dev/null) content='$(reason_lines)'"
+fi
+
+# ── a 200 carrying stored:false is NOT 'posted' ────────────────────────────
+# The endpoint fails open on its own storage error (outcome.ex:160-163, and a
+# second path at :268) and still answers 200 with `"stored" => receipt.stored?`
+# (outcome_controller.ex:398). Logging the status alone recorded a SERVER-side
+# loss as a success — the exact failure this note exists to stop (Greptile P1).
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+export CURL_BODY_FILE="$CASE/unstored.json"
+echo '{"grounding_id":"g-un","status":"ok","stored":false}' >"$CURL_BODY_FILE"
+rdir="$TMPDIR/mollow-supply/sess-UN"
+mkdir -p "$rdir"
+echo '{"grounding_id":"g-un","grounded_at":100,"facts":[{"citation_key":"mh1","match_text":"alpha"}]}' >"$rdir/g-un.json"
+run_hook "supply-stop.sh" '{"session_id":"sess-UN","transcript_path":"/nope","stop_hook_active":false}'
+if [ "$(cut -f4 "$(reasons_log)" 2>/dev/null)" = "post_unstored" ]; then
+  pass "reasons: a 200 with stored:false records 'post_unstored', not 'posted'"
+else
+  fail "reasons: stored:false" "lines='$(reason_lines)'"
+fi
+
+# ── a 200 whose body has NO stored field is not read as a failure ───────────
+# "I could not tell" must not be reported as "the server lost it": that would
+# invent a server defect out of a response-shape change.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+export CURL_BODY_FILE="$CASE/noshape.json"
+echo '{"grounding_id":"g-ns","status":"ok"}' >"$CURL_BODY_FILE"
+rdir="$TMPDIR/mollow-supply/sess-NS"
+mkdir -p "$rdir"
+echo '{"grounding_id":"g-ns","grounded_at":100,"facts":[{"citation_key":"mh1","match_text":"alpha"}]}' >"$rdir/g-ns.json"
+run_hook "supply-stop.sh" '{"session_id":"sess-NS","transcript_path":"/nope","stop_hook_active":false}'
+if [ "$(cut -f4 "$(reasons_log)" 2>/dev/null)" = "posted:unknown_stored" ]; then
+  pass "reasons: an absent stored field is 'posted:unknown_stored', not a failure"
+else
+  fail "reasons: absent stored field" "lines='$(reason_lines)'"
+fi
+
+# ── the hook writes NOTHING to stderr, including on its very first note ────
+# Redirections are applied left to right, so `wc -c <"$log" 2>/dev/null` printed
+# "No such file or directory" to the hook's own stderr on EVERY first call —
+# a diagnostic breaking the contract it documents (Greptile, #7502). This case
+# captures stderr rather than discarding it, which is why the earlier cases
+# could not see it.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+err_file="$CASE/stderr.txt"
+printf '{"session_id":"sess-ERR","transcript_path":"/nope","stop_hook_active":true}' |
+  bash "$DIR/supply-stop.sh" >/dev/null 2>"$err_file"
+if [ ! -s "$err_file" ] && printf '%s' "$(reason_lines)" | grep -q reentrant; then
+  pass "reasons: the first note writes nothing to stderr"
+else
+  fail "reasons: stderr on first note" "stderr='$(cat "$err_file")' lines='$(reason_lines)'"
+fi
+
+# ── two overlapping writers do not erase the archive ───────────────────────
+# Every session on this machine shares one $HOME. Without a lock both can read
+# a size over the cap: the first rotates and appends to a fresh log, the second
+# moves THAT nearly-empty file over .1 and the real archive is gone (Greptile).
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+mkdir -p "$HOME/.mollow"
+head -c 1048577 /dev/zero | tr '\0' 'x' >"$(reasons_log)"
+for n in 1 2 3; do
+  printf '{"session_id":"sess-RACE%s","transcript_path":"/nope","stop_hook_active":true}' "$n" |
+    bash "$DIR/supply-stop.sh" >/dev/null 2>&1 &
+done
+wait
+archive_size="$(wc -c <"$(reasons_log).1" 2>/dev/null | tr -d ' ' || echo 0)"
+if [ -f "$(reasons_log).1" ] && [ "${archive_size:-0}" -gt 1000000 ]; then
+  pass "reasons: concurrent writers rotate once and keep the full archive"
+else
+  fail "reasons: concurrent rotate lost the archive" \
+    "archive=${archive_size:-missing} live=$(wc -c <"$(reasons_log)" 2>/dev/null)"
+fi
+
+# ── a non-200 from the seam is recorded WITH its status ──────────────────────
+# `000` and a real 4xx mean different things (one transient, one configuration
+# that answers identically every turn), so the code has to ride the line.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+export CURL_STATUS=500
+export CURL_BODY_FILE="$CASE/err.json"
+echo '{"error":{"type":"boom"}}' >"$CURL_BODY_FILE"
+rdir="$TMPDIR/mollow-supply/sess-E5"
+mkdir -p "$rdir"
+echo '{"grounding_id":"g-e5","grounded_at":100,"facts":[{"citation_key":"mh1","match_text":"alpha"}]}' >"$rdir/g-e5.json"
+run_hook "supply-stop.sh" '{"session_id":"sess-E5","transcript_path":"/nope","stop_hook_active":false}'
+if printf '%s' "$(reason_lines)" | grep -q 'post_failed:500'; then
+  pass "reasons: a 500 from the seam records 'post_failed:500'"
+else
+  fail "reasons: non-200 post" "lines='$(reason_lines)'"
+fi
+
+# ── the log is bounded: it rotates rather than growing without limit ─────────
+# A hook that appends forever on a dogfood machine is a slow disk leak, and the
+# rotate uses `mv` only — this file's own history (MOL-6199/6255/6271) is why
+# nothing here reaches for `rm` with a glob.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+mkdir -p "$HOME/.mollow"
+# One byte over the cap, so the next append must rotate.
+head -c 1048577 /dev/zero | tr '\0' 'x' >"$(reasons_log)"
+run_hook "supply-stop.sh" '{"session_id":"sess-RO","transcript_path":"/nope","stop_hook_active":false}'
+if [ -f "$(reasons_log).1" ] && [ "$(wc -c <"$(reasons_log)" | tr -d ' ')" -lt 1048577 ]; then
+  pass "reasons: an oversized log rotates to .1 and the live file restarts small"
+else
+  fail "reasons: rotate" "live=$(wc -c <"$(reasons_log)" 2>/dev/null) rotated=$([ -f "$(reasons_log).1" ] && echo yes || echo no)"
+fi
+
+# ── an UNWRITABLE log location must not break the turn ──────────────────────
+# This is the one new failure mode the note introduces into every opted-in
+# session, so it gets its own case rather than resting on the `|| true`s being
+# read as correct. A post-back must still be sent when the log cannot be
+# written: the diagnostic is subordinate to the thing it diagnoses.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+export CURL_BODY_FILE="$CASE/ok2.json"
+echo '{"grounding_id":"g-ro","status":"ok"}' >"$CURL_BODY_FILE"
+# A FILE where the directory must go, so `mkdir -p` cannot succeed.
+printf 'not a directory' >"$HOME/.mollow"
+rdir="$TMPDIR/mollow-supply/sess-UW"
+mkdir -p "$rdir"
+echo '{"grounding_id":"g-ro","grounded_at":100,"facts":[{"citation_key":"mh1","match_text":"alpha"}]}' >"$rdir/g-ro.json"
+run_hook "supply-stop.sh" '{"session_id":"sess-UW","transcript_path":"/nope","stop_hook_active":false}'
+if [ "$LAST_RC" -eq 0 ] && curl_called; then
+  pass "reasons: an unwritable log location still posts back, exit 0"
+else
+  fail "reasons: unwritable log must not break the post-back" \
+    "rc=$LAST_RC curl='$(cat "$CURL_LOG")'"
+fi
+
+# ── an OLD lock that cannot be removed must still terminate ─────────────────
+# The staleness sweep used to `continue`, skipping both the sleep and the
+# attempt counter, so a stale lock `rmdir` could not remove spun the loop
+# forever — in a function that runs on every Stop in every session (Greptile,
+# #7502). `~/.mollow` is made read-only here so the rmdir genuinely fails,
+# which is the case a writable-directory test cannot reach.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+mkdir -p "$HOME/.mollow/supply-stop-reasons.lock"
+# Backdated past the 60s threshold so the sweep branch is the one taken.
+touch -t 202001010000 "$HOME/.mollow/supply-stop-reasons.lock" 2>/dev/null || true
+chmod 500 "$HOME/.mollow"
+lock_start=$(date +%s)
+printf '{"session_id":"sess-LOCK","transcript_path":"/nope","stop_hook_active":true}' >"$CASE/lock-in.json"
+run_bounded 20 bash "$DIR/supply-stop.sh" <"$CASE/lock-in.json" >/dev/null 2>&1
+lock_rc=$?
+lock_elapsed=$(($(date +%s) - lock_start))
+chmod 700 "$HOME/.mollow"
+# `-eq 0`, not `-ne 124`. The hook is fail-open and exits 0 on every path, so 0
+# is the only passing status — and `-ne 124` accepted 127, which is what a
+# MISSING `timeout` returns without running the hook at all. That made the case
+# vacuous on a stock macOS install, which is the platform these hooks run on
+# (Greptile, #7502). `run_bounded` removes the dependency; this assertion makes
+# a silent non-run fail even so.
+if [ "$lock_rc" -eq 0 ] && [ "$lock_elapsed" -lt 10 ]; then
+  pass "reasons: an unremovable stale lock terminates (rc=$lock_rc, ${lock_elapsed}s)"
+else
+  fail "reasons: unremovable stale lock did not terminate cleanly" \
+    "rc=$lock_rc (0 required; 124 = bounded out, 127 = command missing) elapsed=${lock_elapsed}s"
+fi
+
+# ── mm_supply_note survives being sourced into an ERREXIT caller ────────────
+# "Always returns 0" has to hold in an errexit shell, and that is not
+# hypothetical: `import-local-memories.sh`, `preflight-supply.sh`,
+# `recall-batch.sh` and `scope-sync.sh` already source `_common.sh` under
+# `set -euo pipefail`. Only the supply hooks call this function today and they
+# use `-uo` without `-e`, so the hazard is one call site away rather than live.
+#
+# The trigger is the RELEASE `rmdir` failing while the lock is held. That cannot
+# be reached by pre-creating the lock — then `mkdir` fails, `held` stays empty,
+# and a failing left operand of `&&` is exempt from errexit, so the bare form
+# passes. Measured: a fixture built that way reports green against the mutation
+# (`negcheck` STILL GREEN), which is why `rmdir` is stubbed to fail instead.
+# That is the one dependency whose failure the invariant is about.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+errexit_out="$(
+  bash -c '
+    set -euo pipefail
+    . "$1/_common.sh"
+    rmdir() { return 1; }     # the release rmdir fails; the lock IS held
+    mm_supply_note probe sess-EE g-ee
+    echo REACHED_RETURN
+  ' _ "$DIR" 2>/dev/null
+)" || true
+if [ "$errexit_out" = "REACHED_RETURN" ]; then
+  pass "reasons: mm_supply_note returns 0 under set -e when the release rmdir fails"
+else
+  fail "reasons: an errexit caller aborted inside mm_supply_note" \
+    "out='$errexit_out' (expected REACHED_RETURN)"
+fi
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 [ "$FAIL" -eq 0 ]
