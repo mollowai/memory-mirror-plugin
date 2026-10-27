@@ -2052,6 +2052,78 @@ else
     "out='$errexit_out' (expected REACHED_RETURN)"
 fi
 
+# ── which RULE credited each fact is recorded, per turn (MOL-8001) ──────────
+# The open threat on MOL-7991 is that the 8-word verbatim path never fires on
+# paraphrase. The tag path does, and is leg-agnostic — so the share of credits
+# each rule carries bounds that threat. It cannot be attributed to a leg from
+# here: `/grounding/v1` deliberately withholds the selection signal.
+#
+# THE WIRE SHAPE IS THE RISK. `match_used` now returns `[{k, via}]`, so every
+# case below asserts the posted `used_fact_ids` as well as the new line.
+
+# ── a cited TAG is recorded as tag, and the payload is unchanged ─────────────
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+stop_case sess-V1 "$TAGGED" "$(usr "where do tests run")" "$(asst "Against mollow_test in compose [fact-2].")"
+if printf '%s' "$POSTED" | grep -q '"used_fact_ids":\["mh-two"\]' &&
+  printf '%s' "$(reason_lines)" | grep -q 'credited:tag=1'; then
+  pass "credit path: a cited tag records credited:tag=1, payload unchanged"
+else
+  fail "credit path: tag" "posted='$POSTED' lines='$(reason_lines)'"
+fi
+
+# ── an 8-word VERBATIM run is recorded as run, not tag ──────────────────────
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+stop_case sess-V2 "$TAGGED" "$(usr "what about staging")" \
+  "$(asst "Note that the staging deploy uses the pinned commit and skips the gate chain entirely.")"
+if printf '%s' "$POSTED" | grep -q '"used_fact_ids":\["mh-one"\]' &&
+  printf '%s' "$(reason_lines)" | grep -q 'credited:run=1'; then
+  pass "credit path: a verbatim run records credited:run=1, payload unchanged"
+else
+  fail "credit path: run" "posted='$POSTED' lines='$(reason_lines)'"
+fi
+
+# ── both rules on one turn are counted separately ───────────────────────────
+# The union case the suite already covers, now carrying its attribution: one
+# fact by run and one by tag. A `via` collapsed to a single value would read
+# `tag=2` or `run=2` here and pass a grep for either alone.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+stop_case sess-V3 "$TAGGED" "$(usr "q")" \
+  "$(asst "The staging deploy uses the pinned commit and skips the gate chain; tests use [fact-2].")"
+vias="$(printf '%s' "$(reason_lines)" | grep -o 'credited:[^[:space:]]*' | head -1)"
+if printf '%s' "$POSTED" | grep -q '"used_fact_ids":\["mh-one","mh-two"\]' &&
+  printf '%s' "$vias" | grep -q 'run=1' &&
+  printf '%s' "$vias" | grep -q 'tag=1'; then
+  pass "credit path: run and tag on one turn are counted apart ($vias)"
+else
+  fail "credit path: mixed turn" "vias='$vias' posted='$POSTED'"
+fi
+
+# ── a turn that cited NOTHING still posts, and writes no credited: line ─────
+# A row of zeros would be indistinguishable from a real reading of zero, and it
+# would sit in the reason tally as though it were an outcome.
+#
+# THE ABSENCE IS NOT ASSERTED ALONE. `! grep -q credited:` also passes when the
+# hook sent no outcome at all — a crash and a correct uncited turn look the same
+# from the absence of one log line (Greptile, #7519). So the positive half is
+# asserted first: the post-back HAPPENED, named this grounding, and omitted
+# `used_fact_ids` rather than sending an empty list, which is what
+# `supply-stop.sh` does when nothing matched ("rather than send an empty list
+# that reads as supplied, cited nothing when we could not tell either way").
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+stop_case sess-V4 "$TAGGED" "$(usr "unrelated")" "$(asst "I have nothing to add about that.")"
+if printf '%s' "$POSTED" | grep -q '"grounding_id":"g-tag"' &&
+  printf '%s' "$POSTED" | grep -q '/grounding/v1/outcome' &&
+  ! printf '%s' "$POSTED" | grep -q 'used_fact_ids' &&
+  ! printf '%s' "$(reason_lines)" | grep -q 'credited:'; then
+  pass "credit path: an uncited turn posts without used_fact_ids and writes no credit line"
+else
+  fail "credit path: uncited turn" "posted='$POSTED' lines='$(reason_lines)'"
+fi
+
 echo
 echo "Passed: $PASS  Failed: $FAIL"
 [ "$FAIL" -eq 0 ]

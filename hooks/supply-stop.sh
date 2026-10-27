@@ -278,22 +278,27 @@ match_used() {
             (($vh // "") as $h
              | if $h == "" then empty
                elif (($hcount[$h] // 0) > 1) then empty
-               elif ($verified | index($h)) != null then $mh
+               elif ($verified | index($h)) != null then {k: $mh, via: "hash"}
                else empty end)
           # Facts mode, explicit citation: the model wrote the tag this fact was
           # shown under (supply-ground.sh). Checked before the verbatim run and
           # credited on its own — a cited tag is the model saying it used the
           # fact, which is what this count means. A receipt from before tags
           # existed has no `label`, so a tag in the answer credits nothing there.
-          elif $lbl != "" and ($araw | contains("[" + $lbl + "]")) then $mh
+          elif $lbl != "" and ($araw | contains("[" + $lbl + "]")) then {k: $mh, via: "tag"}
           elif $n == 0 then empty
           elif $n < 8 then
-            (if $a | contains($w | join(" ")) then $mh else empty end)
+            (if $a | contains($w | join(" ")) then {k: $mh, via: "short"} else empty end)
           else
             ([ range(0; $n - 7) | $w[.:.+8] | join(" ") ] as $sh
-             | if any($sh[]; . as $s | $a | contains($s)) then $mh else empty end)
+             | if any($sh[]; . as $s | $a | contains($s)) then {k: $mh, via: "run"} else empty end)
           end ]
-    | unique
+    # `unique_by(.k)`, not `unique`: one entry per FACT, as before. Plain
+    # `unique` over objects dedupes on the whole object, so it would keep the
+    # same id twice if two branches could credit it. They cannot — the branches
+    # are `elif`-ordered and the first match wins — but keying the dedupe on the
+    # id says so rather than resting on that ordering surviving a future edit.
+    | unique_by(.k)
     '
   # BYTES, not characters: `${#ans}` counts characters under a UTF-8 locale,
   # but the exec/kernel per-argument limit this threshold guards against is a
@@ -492,9 +497,32 @@ if [ "$receipt_mode" != "pointer" ] && [ -n "${window:-}" ] && [ "${since:-0}" -
 fi
 if [ "$receipt_mode" = "pointer" ]; then evidence="$verified_hashes"; else evidence="$answer"; fi
 
+# ── which RULE credited each fact, for the local log only (MOL-8001) ─────────
+# `match_used` now returns `[{k, via}]`. **The wire shape is unchanged** —
+# `used_fact_ids` is still the plain id list, extracted here — because
+# `/grounding/v1`'s fact map deliberately withholds the selection signal
+# (`supply.ex:1264-1273`: "widening it is a decision to take deliberately and
+# separately, not a side effect of adding server-side diagnostics"), and two
+# contract tests pin that key set. So these counts are per TURN and cannot be
+# attributed to a retrieval leg from here.
+#
+# Per-turn is still the measurement that matters. The open threat on MOL-7991
+# is that the 8-word verbatim path never fires on paraphrase, which could bias a
+# comparison between two legs whose text differs systematically. If the TAG path
+# carries most credits, that threat is bounded whatever the legs do, because the
+# verbatim path is then barely load-bearing. Answering it BY leg needs the API
+# decision above; bounding it does not.
 used='[]'
+credit_vias=''
 if [ -n "$evidence" ]; then
-  used="$(match_used "$receipt" "$answer" "$verified_hashes")"
+  credited="$(match_used "$receipt" "$answer" "$verified_hashes")"
+  used="$(printf '%s' "$credited" | jq -c 'map(.k)' 2>/dev/null || printf '[]')"
+  # `tag=2,run=1`. Grouped and joined, and EMPTY when nothing was credited —
+  # a row of zeros would be indistinguishable from a real reading of zero.
+  credit_vias="$(
+    printf '%s' "$credited" |
+      jq -r 'group_by(.via) | map("\(.[0].via)=\(length)") | join(",")' 2>/dev/null || true
+  )"
 fi
 
 # Omit used_fact_ids entirely when we have no reliable signal (unreadable
@@ -549,6 +577,13 @@ if [ -n "$payload" ]; then
         false) mm_supply_note post_unstored "$session_id" "$grounding_id" ;;
         *) mm_supply_note posted:unknown_stored "$session_id" "$grounding_id" ;;
       esac
+
+      # Its own line, so the reason tallies stay readable — `cut -f4 | uniq -c`
+      # keeps working and these rows sort together under `credited:`. Only on a
+      # posted turn: a decline has no citations to attribute.
+      if [ -n "$credit_vias" ]; then
+        mm_supply_note "credited:${credit_vias}" "$session_id" "$grounding_id"
+      fi
       ;;
     *)
       mm_supply_note "post_failed:${outcome_code:-unknown}" "$session_id" "$grounding_id"
