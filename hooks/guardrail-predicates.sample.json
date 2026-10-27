@@ -1,0 +1,42 @@
+{
+  "_doc": "PORTABLE AUTHORED-DOCTRINE PREDICATES — SAMPLE (MOL-7864 plumbing).",
+  "_integration_point": "MOL-7974 authors the real coding doctrine and REPLACES the `predicates` array below. Activate a doctrine by copying this file to `guardrail-predicates.json` next to guardrail-predicates-portable.sh (the packaging step does this automatically), or by pointing MOLLOW_PORTABLE_PREDICATES_FILE at it.",
+  "_sanitizer_contract": "MOL-2182: NO monorepo paths, NO /workspaces/ assumptions, NO Mollow-internal repo slugs/identifiers. Every rule must be portable to any customer repo. check_portable_predicates_sanitized() (in guardrail-predicates-portable.sh) enforces this and is run by the test suite and the packaging step.",
+  "_schema": {
+    "id": "stable identifier for the rule (string)",
+    "applies_to": "array of tool names: Bash | Write | Edit | MultiEdit",
+    "target": "which field to match: command | file_path | content",
+    "pattern": "an Oniguruma regular expression (jq test/2), matched against the target text",
+    "flags": "optional jq regex flags, e.g. \"i\" for case-insensitive",
+    "message": "short advisory shown to the user",
+    "fix": "how to satisfy the doctrine instead",
+    "_note": "All predicates are WARN-ONLY (advisory); the loader always emits warn severity."
+  },
+  "version": 1,
+  "predicates": [
+    {
+      "id": "sample.force-push-no-lease",
+      "applies_to": ["Bash"],
+      "target": "command",
+      "pattern": "git\\s+push\\b.*--force(?!-with-lease)",
+      "message": "force-push without --force-with-lease",
+      "fix": "Prefer 'git push --force-with-lease' so you don't clobber a teammate's commits."
+    },
+    {
+      "id": "sample.no-verify",
+      "applies_to": ["Bash"],
+      "target": "command",
+      "pattern": "(^|\\s)--no-verify(\\s|$)",
+      "message": "--no-verify bypasses your git hooks",
+      "fix": "Let the pre-commit / pre-push checks run; skip them only deliberately."
+    },
+    {
+      "id": "sample.todo-marker-introduced",
+      "applies_to": ["Write", "Edit", "MultiEdit"],
+      "target": "content",
+      "pattern": "\\b(TODO|FIXME|XXX)\\b",
+      "message": "introducing a TODO/FIXME/XXX marker",
+      "fix": "Capture the follow-up in your issue tracker rather than leaving a bare marker in the code."
+    }
+  ]
+}

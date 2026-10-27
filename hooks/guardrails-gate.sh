@@ -73,6 +73,23 @@ if [ -f "$DIR/guardrail-predicates-mollow.sh" ]; then
   WARN_LINES="$(mollow_guardrail_predicates "$TOOL_NAME" "$CMD" "$FILE_PATH" "$CONTENT" "$CWD" 2>/dev/null || true)"
 fi
 
+# ── Portable authored-doctrine predicates (warn-only; data-file driven) ───────
+# The PUBLIC, SANITIZED slot (MOL-7864): the vehicle for one authored coding
+# doctrine shipped to every customer with NO Mollow credential. The loader is
+# zero-network; it reads a local JSON data file (guardrail-predicates.json, or
+# MOLLOW_PORTABLE_PREDICATES_FILE). Absent loader OR absent data file => skipped,
+# never fatal — so the gate still fails safe offline. MOL-7974 supplies the
+# data-file CONTENT (see guardrail-predicates.sample.json); this is the plumbing.
+if [ -f "$DIR/guardrail-predicates-portable.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$DIR/guardrail-predicates-portable.sh"
+  PORTABLE_WARN_LINES="$(portable_guardrail_predicates "$TOOL_NAME" "$CMD" "$FILE_PATH" "$CONTENT" "$CWD" 2>/dev/null || true)"
+  if [ -n "$PORTABLE_WARN_LINES" ]; then
+    WARN_LINES="${WARN_LINES:+${WARN_LINES}
+}${PORTABLE_WARN_LINES}"
+  fi
+fi
+
 # ── Server evaluation (opt-in; MOL-7848) ──────────────────────────────────────
 # Ships the pending call to Mollow.Engram.Guardrails.evaluate/2 and merges its
 # warnings into WARN_LINES; a server :block lands in SERVER_BLOCK_LINES and
