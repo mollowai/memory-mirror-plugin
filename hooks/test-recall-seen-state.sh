@@ -455,15 +455,21 @@ done
 t="$(tmpdir)"
 f="$t/seen.json"
 export MM_SEEN_MAX_KEYS=99999999999999999999
-mm_seen_add "$f" "k1" '["a"]' || true
-rc=$?
-mm_seen_add "$f" "k2" '["b"]' || true
+# `cmd || true` followed by `rc=$?` reads the status of the `|| true`, which is
+# always 0 — so the abort half of this assertion was dead and would have passed
+# even if mm_seen_add aborted, the one thing this case exists to catch. Under
+# `set -e` the status has to be captured in the `||` branch instead.
+rc1=0
+mm_seen_add "$f" "k1" '["a"]' || rc1=$?
+rc2=0
+mm_seen_add "$f" "k2" '["b"]' || rc2=$?
 unset MM_SEEN_MAX_KEYS
-if [ "$rc" -eq 0 ] && [ "$(jq -r 'keys | length' "$f" 2>/dev/null)" = 2 ]; then
+if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ] &&
+   [ "$(jq -r 'keys | length' "$f" 2>/dev/null)" = 2 ]; then
   pass "an absurdly long MM_SEEN_MAX_KEYS falls back without aborting the caller"
 else
   fail "an absurdly long MM_SEEN_MAX_KEYS falls back without aborting the caller" \
-    "rc=$rc file: $(cat "$f" 2>/dev/null)"
+    "rc1=$rc1 rc2=$rc2 file: $(cat "$f" 2>/dev/null)"
 fi
 rm -rf "$t"
 
