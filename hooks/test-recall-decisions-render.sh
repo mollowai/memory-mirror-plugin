@@ -51,20 +51,27 @@ fail() {
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/mm-recall-render-XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$TMP/bin"
+mkdir -p "$TMP/bin" "$TMP/repo"
+# A real repo, so the proposal stash has a root to resolve (it is written beside
+# the sweep receipt, at <repo root>/tmp/).
+( cd "$TMP/repo" && git init -q . ) >/dev/null 2>&1
 
 # run <response-json> — stub the server reply, return the emitted context in CTX.
 run() {
   printf '%s' "$1" > "$TMP/response.json"
   cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
+# MM_FAIL_RECALL stands in for a recall that never answered (timeout, server
+# down) — the hook sees empty output and a nonzero status, exactly as it would
+# from the real `mm_post_read` budget expiring.
+[ -n "${MM_FAIL_RECALL:-}" ] && exit 7
 cat "$MM_FAKE_RESPONSE"
 EOF
   chmod +x "$TMP/bin/curl"
 
   local out
   out="$(
-    printf '%s' '{"hook_event_name":"UserPromptSubmit","prompt":"where should this work happen?","cwd":"/tmp","session_id":"s1"}' \
+    printf '%s' "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"where should this work happen?\",\"cwd\":\"$TMP/repo\",\"session_id\":\"s1\"}" \
       | env -i \
         PATH="$TMP/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin" \
         HOME="$TMP" \
@@ -72,6 +79,7 @@ EOF
         MOLLOW_MEMORY_API_KEY="mol_test" \
         MOLLOW_MEMORY_URL="https://example.invalid/mcp/v2" \
         MOLLOW_MEMORY_CREDS_FROM_FILES=0 \
+        ${MM_FAIL_RECALL:+MM_FAIL_RECALL=1} \
         bash "$HOOK" 2>/dev/null
   )" || true
 
@@ -120,6 +128,55 @@ if grep -q "worktree or inline?" <<<"$CTX"; then pass "past decisions still rend
 echo "── no view emits nothing ──"
 run "$NO_VIEW"
 if [ -z "$CTX" ]; then pass "an empty corpus injects no context"; else fail "an empty corpus injects no context" "$CTX"; fi
+
+echo "── the proposal is STASHED for the answer-time capture ──"
+# capture-decision.sh cannot call recall itself: it runs on PostToolUse with a
+# 6s budget and the recall already happened this turn. So the proposal we
+# already fetched is stashed here and read there. Without this, the only
+# calibration signal we have — did the operator pick what Engram proposed, at
+# what confidence — is discarded on every prompt.
+rm -f "$TMP/repo/tmp/.engram-proposal-s1.json"
+run "$PROPOSED"
+STASH="$TMP/repo/tmp/.engram-proposal-s1.json"
+if [ -f "$STASH" ]; then pass "a proposal writes the stash"; else fail "a proposal writes the stash" "$(ls -la "$TMP/repo/tmp" 2>&1)"; fi
+if [ -f "$STASH" ] && [ "$(jq -r '.option' "$STASH" 2>/dev/null)" = "Isolated worktree" ]; then pass "stash carries the option"; else fail "stash carries the option" "$(cat "$STASH" 2>/dev/null)"; fi
+if [ -f "$STASH" ] && [ "$(jq -r '.confidence' "$STASH" 2>/dev/null)" = "0.774" ]; then pass "stash carries the confidence"; else fail "stash carries the confidence" "$(cat "$STASH" 2>/dev/null)"; fi
+
+echo "── no proposal writes NO stash (absent must not read as agreement) ──"
+rm -f "$STASH"
+run "$UNMAPPED"
+if [ -f "$STASH" ]; then fail "an unmapped choice must not be stashed as a proposal" "$(cat "$STASH")"; else pass "unmapped ⇒ no stash"; fi
+rm -f "$STASH"
+run "$NO_VIEW"
+if [ -f "$STASH" ]; then fail "no view must not be stashed" "$(cat "$STASH")"; else pass "no view ⇒ no stash"; fi
+
+echo "── a later prompt with no proposal CLEARS the previous one's stash ──"
+# The staleness case, and the reason the stash is cleared before the recall
+# rather than written after it. Every early exit in this hook — an empty prompt,
+# a malformed body, a recall that times out — is upstream of the write. So
+# without an up-front clear, turn 2's card reads turn 1's proposal as a proposal
+# about its own question: a well-formed, fresh-looking file about a different
+# prompt. That is the exact false attribution the per-question scoping rule
+# exists to prevent, arriving through the filesystem instead.
+run "$PROPOSED"
+[ -f "$STASH" ] || fail "setup: turn 1 must leave a stash"
+run "$NO_VIEW"
+if [ -f "$STASH" ]; then
+  fail "a no-proposal turn must clear the stale stash" "$(cat "$STASH")"
+else
+  pass "no-proposal turn ⇒ stale stash cleared"
+fi
+
+run "$PROPOSED"
+[ -f "$STASH" ] || fail "setup: turn 1 must leave a stash (timeout case)"
+MM_FAIL_RECALL=1
+run "$PROPOSED"
+unset MM_FAIL_RECALL
+if [ -f "$STASH" ]; then
+  fail "a turn whose recall never answered must not leave the previous proposal" "$(cat "$STASH")"
+else
+  pass "unreachable recall ⇒ stale stash cleared (the write is never reached)"
+fi
 
 echo
 echo "passed=$PASS failed=$FAIL"

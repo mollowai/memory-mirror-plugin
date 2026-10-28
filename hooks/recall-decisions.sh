@@ -14,7 +14,31 @@ mm_ready || exit 0
 input="$(cat)"
 prompt="$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null || true)"
 cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
+sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)"
 project="$(mm_project_of "$cwd")"
+
+# The proposal stash this turn may write, resolved and CLEARED before anything
+# can exit early.
+#
+# Clearing up front is the load-bearing half. The write below is reached only on
+# the happy path — an empty prompt, a malformed body and a recall timeout all
+# exit before it — so a turn that produces no proposal would otherwise leave the
+# PREVIOUS turn's proposal on disk, and the card raised in this turn would read
+# it as a proposal about its own question. That is silent false attribution: the
+# file is well-formed, fresh-looking, and about a different prompt. So absence
+# is established first and presence is earned per turn.
+stash_file=""
+if [ -n "${sid:-}" ]; then
+  case "$sid" in
+    *[!A-Za-z0-9_-]*) ;;
+    *)
+      _root="$(git -C "${cwd:-$PWD}" rev-parse --show-toplevel 2>/dev/null || true)"
+      [ -n "$_root" ] || _root="${cwd:-$PWD}"
+      stash_file="${_root}/tmp/.engram-proposal-${sid}.json"
+      rm -f "$stash_file" 2>/dev/null || true
+      ;;
+  esac
+fi
 
 [ -z "$prompt" ] && exit 0
 
@@ -111,4 +135,35 @@ if [ "$shown" != "[]" ] && [ -n "$ctx" ]; then
   mm_seen_add "$seen_file" "$seen_key" "$shown" || true
 fi
 
+# Stash the proposal for answer time (MOL-7985 follow-on).
+#
+# This is the only calibration signal we have — "when Engram proposed X at
+# confidence C, did the operator pick X?" — and it was computed on every prompt
+# and discarded. `capture-decision.sh` is where the answer arrives, and it
+# cannot recall for itself: it runs on PostToolUse inside a 6s budget, and the
+# recall for this turn already happened here.
+#
+# Written ONLY when a proposal exists. An `unmapped_top_choice` is deliberately
+# not stashed: the server separates those two cases on purpose, and stashing a
+# nearest-neighbour as a proposal would manufacture agreement data about a
+# question Engram had no view on.
+#
+# The proposal is PROMPT-scoped, not per-question — `recall` is called with the
+# whole prompt as the question. The reader is responsible for not presenting it
+# as a per-question verdict; it records `engram_scope: "prompt"` so the
+# limitation travels with the data rather than living in a comment here.
+if [ -n "$stash_file" ]; then
+  _proposal="$(printf '%s' "$resp" | jq -c '
+    .proposed_answer as $p
+    | if ($p == null or ($p.option // "") == "") then empty
+      else {
+        option: $p.option,
+        confidence: (if ($p|has("confidence")) then $p.confidence else null end),
+        count: (if has("count") then .count else null end)
+      } end' 2>/dev/null || true)"
+  if [ -n "$_proposal" ]; then
+    mkdir -p "$(dirname "$stash_file")" 2>/dev/null &&
+      printf '%s\n' "$_proposal" >"$stash_file" 2>/dev/null || true
+  fi
+fi
 exit 0
