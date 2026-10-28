@@ -141,11 +141,14 @@ grounding_id="$(printf '%s' "$resp" | jq -r '.grounding_id // empty' 2>/dev/null
 #
 # Dedupe on `message_hash` — a digest OVER THE FACT'S CONTENT, the stable
 # identifier the wire carries and the same one the post-back cites — never on a
-# row id. Keyed by env label so a fleet-target switch re-surfaces once, matching
-# recall-decisions.sh and import-local-memories.sh. Per-machine "seen here", not
-# "dismissed": acceptable for an advisory that never blocks.
+# row id. Keyed by env label AND SESSION (`mm_supply_seen_key`, MOL-8078) so the
+# suppression lasts as long as the conversation it is about, which is what the
+# rationale above actually claims. It was keyed by env label alone, matching
+# recall-decisions.sh — but that one is a per-machine advisory that never blocks,
+# where this one decides whether a fact reaches the prompt at all. Machine-wide
+# there, conversation-wide here; the two are no longer meant to match.
 seen_file="${HOME}/.mollow/supply-seen.json"
-seen_key="$(mm_env_label)"
+seen_key="$(mm_supply_seen_key "$(mm_env_label)" "$session_id")"
 seen_ids='[]'
 if [ -f "$seen_file" ]; then
   seen_ids="$(jq -c --arg k "$seen_key" '.[$k] // []' "$seen_file" 2>/dev/null || echo '[]')"
@@ -171,7 +174,25 @@ fresh_count="$(printf '%s' "$fresh" | jq 'length' 2>/dev/null || echo 0)"
 # Nothing new to inject. The server still recorded a supply for this grounding_id,
 # but we injected nothing this turn, so there is nothing to measure the usage of —
 # no receipt, no post-back. Keeps the measurement honest (supplied = injected).
-[ "$fresh_count" -gt 0 ] || exit 0
+#
+# Note WHICH of the two reasons it was, because they are opposite findings and
+# this exit used to record neither (MOL-8078): the server returned no facts at
+# all, or it returned facts and suppression filtered every one. The second is
+# the harm this issue is about, and it was previously unobservable — a turn that
+# was served nothing because ANOTHER session had already seen everything looked
+# identical to a turn whose corpus held nothing. `reason:detail` matches the
+# grammar `supply-stop.sh` already writes (`posted:unknown_stored`,
+# `credited:…`, `post_failed:…`); nothing outside the test suite parses the log.
+if [ "$fresh_count" -le 0 ]; then
+  total_count="$(printf '%s' "$resp" | jq '[.facts[]?] | length' 2>/dev/null || echo 0)"
+  case "$total_count" in '' | *[!0-9]*) total_count=0 ;; esac
+  if [ "$total_count" -gt 0 ]; then
+    mm_supply_note "all_seen:${total_count}" "$session_id" "${grounding_id:--}"
+  else
+    mm_supply_note no_facts "$session_id" "${grounding_id:--}"
+  fi
+  exit 0
+fi
 
 # ── The injected wording IS the deliverable in pointer mode ──────────────────
 # plan-hash-pointer-demo.md §8 lists "model does not call the fetch tool" as a

@@ -381,6 +381,67 @@ if [ -n "$first_out" ] && [ -z "$LAST_OUT" ]; then
 else
   fail "ground: dedupe suppresses already-shown facts" "first='$first_out' second='$LAST_OUT'"
 fi
+# The turn that injected nothing says WHY, and says which of the two reasons it
+# was (MOL-8078). `all_seen:2` — the server returned two facts and suppression
+# filtered both — is the observation this issue says was missing; it previously
+# looked identical to a turn whose corpus held nothing.
+if grep -q "all_seen:2" "$HOME/.mollow/supply-stop-reasons.log" 2>/dev/null; then
+  pass "ground: a fully-suppressed turn logs all_seen:<n>, naming the count filtered"
+else
+  fail "ground: a fully-suppressed turn logs all_seen:<n>" \
+    "log='$(cat "$HOME/.mollow/supply-stop-reasons.log" 2>/dev/null)'"
+fi
+
+# ── dedupe is per SESSION, not per machine (MOL-8078) ────────────────────────
+#
+# The regression this fences is the one above succeeding too well: keyed by env
+# label alone, the second session below is suppressed by the FIRST session's
+# injection and injects nothing, for ~100 turns, on a host every session shares.
+#
+# Deliberately no `reset_case` between the two runs — that would hand the second
+# session a fresh $HOME and so a fresh supply-seen.json, and the case would pass
+# whatever the key is. The shared $HOME is the whole fixture.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+ground_body
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-X1","cwd":"/tmp"}'
+x1_out="$LAST_OUT"
+ground_body   # the same two facts, a fresh grounding call, a DIFFERENT session
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-X2","cwd":"/tmp"}'
+if [ -n "$x1_out" ] && [ -n "$LAST_OUT" ] \
+  && printf '%s' "$LAST_OUT" | jq -e '.hookSpecificOutput.additionalContext | test("pinned commit")' >/dev/null 2>&1; then
+  pass "ground: a second SESSION still gets facts the first session was shown"
+else
+  fail "ground: a second SESSION still gets facts the first session was shown" \
+    "x1='${x1_out:0:80}' x2='${LAST_OUT:0:80}'"
+fi
+# Both sessions' ids are retained, under two keys rather than one.
+if [ "$(jq -r 'keys | length' "$HOME/.mollow/supply-seen.json" 2>/dev/null)" = "2" ] \
+  && [ "$(jq -r '[keys[] | select(endswith(":sess-X1"))] | length' "$HOME/.mollow/supply-seen.json" 2>/dev/null)" = "1" ] \
+  && [ "$(jq -r '[keys[] | select(endswith(":sess-X2"))] | length' "$HOME/.mollow/supply-seen.json" 2>/dev/null)" = "1" ]; then
+  pass "ground: the seen file carries one key per session, suffixed with the session id"
+else
+  fail "ground: the seen file carries one key per session" \
+    "keys=$(jq -c 'keys' "$HOME/.mollow/supply-seen.json" 2>/dev/null)"
+fi
+
+# ── an empty fact list is NOT reported as suppression ────────────────────────
+#
+# The control for the all_seen case above: both exit without injecting, and
+# before this change both recorded nothing, so the two were indistinguishable.
+reset_case
+export MOLLOW_SUPPLY_MODE=on
+printf '%s' '{"grounding_id":"g-empty","mode":"facts","facts":[]}' >"$CASE/ground.json"
+export CURL_BODY_FILE="$CASE/ground.json"
+run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-EMPTY","cwd":"/tmp"}'
+if [ "$LAST_RC" -eq 0 ] && [ -z "$LAST_OUT" ] \
+  && grep -q "no_facts" "$HOME/.mollow/supply-stop-reasons.log" 2>/dev/null \
+  && ! grep -q "all_seen" "$HOME/.mollow/supply-stop-reasons.log" 2>/dev/null; then
+  pass "ground: zero facts returned logs no_facts, never all_seen"
+else
+  fail "ground: zero facts returned logs no_facts, never all_seen" \
+    "rc=$LAST_RC out='$LAST_OUT' log='$(cat "$HOME/.mollow/supply-stop-reasons.log" 2>/dev/null)'"
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # supply-stop.sh — OFF state

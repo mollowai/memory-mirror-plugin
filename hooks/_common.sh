@@ -81,6 +81,46 @@ mm_env_label() {
   esac
 }
 
+# mm_supply_seen_key <env_label> [session_id]
+#
+# The key `supply-ground.sh` suppresses injected facts under. Per SESSION, not
+# per environment (MOL-8078).
+#
+# It was `mm_env_label` alone, which made suppression machine-wide and permanent
+# for ~100 turns: a fact injected in one session was unservable in every other
+# session on the host, including a brand-new one that had never seen it. The
+# rationale beside the dedupe is per-CONVERSATION — "a top-ranked fact stays
+# top-ranked for as long as the conversation is about it" — so the implementation
+# was wider than its own stated purpose. Nothing is exempt from the filter, so a
+# curated `decision` or `preference` was suppressed on the same terms as a raw
+# transcript line.
+#
+# The env label STAYS in the key. Two reasons, and the second is the one that
+# bites: a session id is unique per session but says nothing about which corpus
+# answered, so pointing a session at staging and back at prod would otherwise
+# reuse one suppression list across two different fact populations; and the file
+# is shared with no other discriminator, so dropping the label would make a
+# dev-target session's ids indistinguishable from a prod one's.
+#
+# An ABSENT session id falls back to the bare env label — today's behaviour —
+# rather than minting a `prod:` suffix that every id-less session would share.
+# A shared degenerate key is worse than the status quo: it would look per-session
+# while behaving machine-wide, which is harder to notice than the original.
+mm_supply_seen_key() {
+  local label="${1:-}" session="${2:-}"
+
+  # Tabs/newlines cannot survive in a JSON object key read back by `jq --arg`
+  # without quoting surprises, and a session id carrying one is a malformed
+  # input rather than a key to honour.
+  session="$(printf '%s' "$session" | tr -d '\n\t ')"
+
+  if [ -n "$session" ]; then
+    printf '%s:%s' "$label" "$session"
+  else
+    printf '%s' "$label"
+  fi
+}
+
 # True when $1 is one of the tokens that mean "on". Leading/trailing whitespace
 # is trimmed first, because these values now also arrive from a hand-written
 # file where a stray space or a missing trailing newline is normal.
@@ -767,8 +807,39 @@ mm_seen_add() {
   # `["dup","dup","other"]` on a fresh file. Greptile caught this on #6360; the
   # test that was supposed to cover it passed only because its SECOND write
   # cleaned up after the first.
-  if jq -c --arg k "$key" --argjson new "$additions" \
-    '(. // {}) | .[$k] = ((((.[$k] // []) - $new) + ($new | unique)) | .[-500:])' \
+  # ── and a cap on the number of KEYS, for the same reason (MOL-8078) ─────────
+  # The id cap above bounds one key; nothing bounded how many keys the file
+  # holds. That was harmless while every caller used one env-wide key, and is
+  # not once `supply-ground.sh` keys per session: one key per session, kept
+  # forever, on a host that runs many a day.
+  #
+  # `del(.[$k])` before the assignment is load-bearing. jq preserves insertion
+  # order, but assigning to an EXISTING key updates it in place rather than
+  # moving it to the end — so without the delete, `.[-N:]` would evict by first
+  # write rather than by last. Deleting and re-adding makes the object read
+  # oldest-key-first, exactly as `(existing - $new) + $new` does for ids, so the
+  # same `.[-N:]` slice is a least-recently-WRITTEN eviction for both.
+  # Normalised to a NUMBER before the zero test, not pattern-matched against the
+  # string `0` (Greptile, #7574). `00` is all digits and is not the string `0`,
+  # so a string test lets it through — and jq's parser accepts `00` as JSON,
+  # where `.[-0:]` keeps the whole array. The cap would be silently disabled and
+  # the file would grow unbounded, which is the exact defect the cap exists to
+  # prevent. `10#` also pins base 10, so `010` is ten rather than eight.
+  local max_keys="${MM_SEEN_MAX_KEYS:-200}"
+  case "$max_keys" in
+    '' | *[!0-9]*) max_keys=200 ;;
+    # More than 9 digits cannot be a meaningful key cap and risks overflowing
+    # the arithmetic below, which would abort a caller running under errexit.
+    *) if [ "${#max_keys}" -gt 9 ]; then max_keys=200; else max_keys=$((10#$max_keys)); fi ;;
+  esac
+  [ "$max_keys" -gt 0 ] || max_keys=200
+
+  if jq -c --arg k "$key" --argjson new "$additions" --argjson maxk "$max_keys" \
+    '(. // {})
+     | (.[$k] // []) as $prev
+     | del(.[$k])
+     | .[$k] = (((($prev - $new) + ($new | unique)) | .[-500:]))
+     | (to_entries | .[-$maxk:] | from_entries)' \
     "$file" 2>/dev/null >"$tmp" ||
     jq -nc --arg k "$key" --argjson new "$additions" '{($k): ($new | unique)}' >"$tmp" 2>/dev/null; then
     mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
