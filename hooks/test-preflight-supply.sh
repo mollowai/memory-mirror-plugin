@@ -124,7 +124,7 @@ run_pf() {
 
 set_context 'Facts from your memory that may bear on this request'
 run_pf --legs facts
-if echo "$LAST_OUT" | grep -q 'facts *served'; then
+if grep -q 'facts *served' <<<"$LAST_OUT"; then
   pass "classify: injected facts => served"
 else
   fail "classify: injected facts => served" "out='$LAST_OUT'"
@@ -132,7 +132,7 @@ fi
 
 set_context 'Mollow supply mode handed you POINTERS, not content.'
 run_pf --legs pointer
-if echo "$LAST_OUT" | grep -q 'pointer *served'; then
+if grep -q 'pointer *served' <<<"$LAST_OUT"; then
   pass "classify: injected pointers => served"
 else
   fail "classify: injected pointers => served" "out='$LAST_OUT'"
@@ -140,7 +140,7 @@ fi
 
 set_context 'Mollow supply mode: the grounding request was rejected (422 invalid_mode). pointer_mode is off for your actor'
 run_pf --legs pointer
-if echo "$LAST_OUT" | grep -q 'pointer *invalid_mode'; then
+if grep -q 'pointer *invalid_mode' <<<"$LAST_OUT"; then
   pass "classify: 422 invalid_mode => invalid_mode (not lumped with 404)"
 else
   fail "classify: 422 invalid_mode => invalid_mode" "out='$LAST_OUT'"
@@ -148,7 +148,7 @@ fi
 
 set_context 'Mollow supply mode: the grounding endpoint answered 404 for POST https://x/grounding/v1/ground.'
 run_pf --legs pointer
-if echo "$LAST_OUT" | grep -q 'pointer *not_found'; then
+if grep -q 'pointer *not_found' <<<"$LAST_OUT"; then
   pass "classify: 404 => not_found (a DIFFERENT class from invalid_mode)"
 else
   fail "classify: 404 => not_found" "out='$LAST_OUT'"
@@ -156,7 +156,7 @@ fi
 
 set_context 'Mollow supply mode: the grounding request was refused (400 workspace_not_named).'
 run_pf --legs facts
-if echo "$LAST_OUT" | grep -q 'facts *workspace'; then
+if grep -q 'facts *workspace' <<<"$LAST_OUT"; then
   pass "classify: 400 workspace_not_named => workspace"
 else
   fail "classify: 400 workspace_not_named => workspace" "out='$LAST_OUT'"
@@ -164,7 +164,7 @@ fi
 
 clear_context
 run_pf --legs facts
-if echo "$LAST_OUT" | grep -q 'facts *silent'; then
+if grep -q 'facts *silent' <<<"$LAST_OUT"; then
   pass "classify: no output => silent"
 else
   fail "classify: no output => silent" "out='$LAST_OUT'"
@@ -183,11 +183,19 @@ fi
 # context and all of them stayed green while this was live. 200KB is comfortably
 # past the buffer — measured: the old pipeline exits 141 at that size and prints
 # nothing at all.
+#
+# That size boundary is a property of `head -c`, which closes the pipe only after a
+# fixed byte count. It is NOT a general rule: `grep -q` exits at its first match,
+# which can land between a writer's writes at ANY size. `echo "$LAST_OUT" | grep -q`
+# took exactly that SIGPIPE on a ~900-byte output in CI, and `pipefail` turned a
+# matching grep into a FAIL (MOL-8125). Assertions here therefore read LAST_OUT
+# through a here-string, which has no writer process to kill; the guard at the end
+# of the suite keeps the piped form out.
 BIG_CTX="$WORK/big.txt"
 { printf 'Facts from your memory that may bear on this request'; head -c 200000 /dev/zero | tr '\0' 'a'; } >"$BIG_CTX"
 cp "$BIG_CTX" "$STUB_DIR/context.txt"
 run_pf --legs facts --expect-facts served
-if [ "$LAST_RC" -eq 0 ] && echo "$LAST_OUT" | grep -q 'facts *served'; then
+if [ "$LAST_RC" -eq 0 ] && grep -q 'facts *served' <<<"$LAST_OUT"; then
   pass "long context: a 200KB served context still prints its leg and honours --expect-*"
 else
   fail "long context => no abort" "rc=$LAST_RC (141 = SIGPIPE abort) out='$(echo "$LAST_OUT" | head -c 300)'"
@@ -254,7 +262,7 @@ MISSING_HOOK_DIR="$WORK/hookless/hooks"
 mkdir -p "$MISSING_HOOK_DIR"
 printf 'mm_resolve_memory_creds() { :; }\n' >"$MISSING_HOOK_DIR/_common.sh"
 PF_HOOK="$MISSING_HOOK_DIR/supply-ground.sh" run_pf --legs facts
-if [ "$LAST_RC" -eq 1 ] && echo "$LAST_OUT" | grep -q 'is not a readable file'; then
+if [ "$LAST_RC" -eq 1 ] && grep -q 'is not a readable file' <<<"$LAST_OUT"; then
   pass "missing hook => exit 1 from the readable-hook guard, not from _common.sh"
 else
   fail "missing hook => exit 1 naming the readable-hook guard" "rc=$LAST_RC out='$LAST_OUT'"
@@ -273,7 +281,7 @@ fi
 # different path must NOT, or the signal is noise.
 set_context 'Facts from your memory'
 run_pf --legs facts
-if echo "$LAST_OUT" | grep -q 'DRIFT:'; then
+if grep -q 'DRIFT:' <<<"$LAST_OUT"; then
   pass "drift: a hook whose content differs from the sibling is called out"
 else
   fail "drift: differing content => DRIFT" "out='$LAST_OUT'"
@@ -292,7 +300,7 @@ cp "$DIR/supply-ground.sh" "$COPY"
 # that the broken-hook cases below construct on purpose.
 cp "$DIR/_common.sh" "$(dirname "$COPY")/_common.sh"
 PF_HOOK="$COPY" MOLLOW_MEMORY_URL="http://127.0.0.1:1/mcp/v2" run_pf --legs facts
-if echo "$LAST_OUT" | grep -q 'drift: *identical'; then
+if grep -q 'drift: *identical' <<<"$LAST_OUT"; then
   pass "drift: a byte-identical copy at another path reads 'identical', not DIFFERS"
 else
   fail "drift: identical copy must not alarm" "out='$LAST_OUT'"
@@ -316,12 +324,12 @@ TABLE="printf '%s\n' \
  '9990 1 /bin/claude --plugin-dir $WORK/mine/plugins/memory-mirror'"
 
 LAST_OUT="$(MM_PREFLIGHT_PS="$TABLE" MM_PREFLIGHT_START_PID=9992 bash "$SCRIPT" --legs facts 2>&1 || true)"
-if echo "$LAST_OUT" | grep -qF "$WORK/mine/plugins/memory-mirror/hooks/supply-ground.sh"; then
+if grep -qF "$WORK/mine/plugins/memory-mirror/hooks/supply-ground.sh" <<<"$LAST_OUT"; then
   pass "resolve: walks its OWN ancestry, not the first --plugin-dir in the table"
 else
   fail "resolve: own ancestry wins" "out='$LAST_OUT'"
 fi
-if echo "$LAST_OUT" | grep -qF "$WORK/theirs/"; then
+if grep -qF "$WORK/theirs/" <<<"$LAST_OUT"; then
   fail "resolve: must not report the neighbour session's copy" "out='$LAST_OUT'"
 else
   pass "resolve: the neighbour session's copy is never reported"
@@ -334,7 +342,7 @@ fi
 TABLE_BARE="printf '%s\n' '9992 9990 bash test-preflight-supply.sh' '9990 1 /bin/claude'"
 if LAST_OUT="$(MM_PREFLIGHT_PS="$TABLE_BARE" MM_PREFLIGHT_START_PID=9992 \
   HOME="$WORK/emptyhome" bash "$SCRIPT" --legs facts 2>&1)"; then LAST_RC=0; else LAST_RC=$?; fi
-if [ "$LAST_RC" -eq 1 ] && echo "$LAST_OUT" | grep -q 'cannot tell which copy'; then
+if [ "$LAST_RC" -eq 1 ] && grep -q 'cannot tell which copy' <<<"$LAST_OUT"; then
   pass "resolve: no --plugin-dir and no cache => refuses, never falls back to the sibling"
 else
   fail "resolve: bare claude with no cache => exit 1" "rc=$LAST_RC out='$LAST_OUT'"
@@ -357,7 +365,7 @@ PF_HOOK="$BROKEN_DIR/supply-ground.sh" run_pf --legs facts
 # the case stays green on the regression. Measured: mutating this guard to
 # `if false` did NOT redden a filename-only assertion. The two guards cover the
 # same input, so each has to be pinned to a string only it can produce.
-if [ "$LAST_RC" -eq 1 ] && echo "$LAST_OUT" | grep -q 'has no readable _common.sh beside it'; then
+if [ "$LAST_RC" -eq 1 ] && grep -q 'has no readable _common.sh beside it' <<<"$LAST_OUT"; then
   pass "broken hook: no _common.sh => exit 1 from the up-front guard, before the hook runs"
 else
   fail "broken hook: missing _common.sh => exit 1 from the up-front guard" "rc=$LAST_RC out='$LAST_OUT'"
@@ -377,7 +385,7 @@ exit 3
 DIES
 chmod +x "$DIES_DIR/supply-ground.sh"
 PF_HOOK="$DIES_DIR/supply-ground.sh" run_pf --legs facts
-if [ "$LAST_RC" -eq 1 ] && echo "$LAST_OUT" | grep -q 'exited 3'; then
+if [ "$LAST_RC" -eq 1 ] && grep -q 'exited 3' <<<"$LAST_OUT"; then
   pass "broken hook: a non-zero exit => exit 1, never classified silent"
 else
   fail "broken hook: non-zero exit => exit 1" "rc=$LAST_RC out='$LAST_OUT'"
@@ -388,7 +396,7 @@ fi
 # failed every empty leg, and `silent` would be unreachable.
 clear_context
 run_pf --legs facts
-if [ "$LAST_RC" -eq 0 ] && echo "$LAST_OUT" | grep -q 'facts *silent'; then
+if [ "$LAST_RC" -eq 0 ] && grep -q 'facts *silent' <<<"$LAST_OUT"; then
   pass "broken hook: an exit-0 empty leg is still silent (the pair is distinguished)"
 else
   fail "broken hook: exit-0 empty leg stays silent" "rc=$LAST_RC out='$LAST_OUT'"
@@ -404,7 +412,7 @@ SPACED="$WORK/my worktree/plugins/memory-mirror"
 make_stub "$SPACED/hooks/supply-ground.sh"
 TABLE_SP="printf '%s\n' '9992 9990 bash test' '9990 1 /bin/claude --plugin-dir $SPACED --setting-sources user'"
 LAST_OUT="$(MM_PREFLIGHT_PS="$TABLE_SP" MM_PREFLIGHT_START_PID=9992 bash "$SCRIPT" --legs facts 2>&1 || true)"
-if echo "$LAST_OUT" | grep -qF "$SPACED/hooks/supply-ground.sh"; then
+if grep -qF "$SPACED/hooks/supply-ground.sh" <<<"$LAST_OUT"; then
   pass "spaced plugin dir: recovered in full when a flag follows it"
 else
   fail "spaced plugin dir: recovered when a flag follows" "out='$LAST_OUT'"
@@ -420,12 +428,12 @@ CACHE_DECOY="$WORK/spacedhome/.claude/plugins/cache/mollow-local/memory-mirror/1
 make_stub "$CACHE_DECOY/supply-ground.sh"
 TABLE_SP2="printf '%s\n' '9992 9990 bash test' '9990 1 /bin/claude --plugin-dir $SPACED trailing-positional'"
 if LAST_OUT="$(MM_PREFLIGHT_PS="$TABLE_SP2" MM_PREFLIGHT_START_PID=9992 HOME="$WORK/spacedhome" bash "$SCRIPT" --legs facts 2>&1)"; then LAST_RC=0; else LAST_RC=$?; fi
-if [ "$LAST_RC" -eq 1 ] && echo "$LAST_OUT" | grep -q 'is not there'; then
+if [ "$LAST_RC" -eq 1 ] && grep -q 'is not there' <<<"$LAST_OUT"; then
   pass "spaced plugin dir: unrecoverable shape refuses instead of using the cache"
 else
   fail "spaced plugin dir: unrecoverable shape => exit 1, no cache fallback" "rc=$LAST_RC out='$LAST_OUT'"
 fi
-if echo "$LAST_OUT" | grep -qF "$CACHE_DECOY"; then
+if grep -qF "$CACHE_DECOY" <<<"$LAST_OUT"; then
   fail "spaced plugin dir: the cached decoy must never be reported" "out='$LAST_OUT'"
 else
   pass "spaced plugin dir: the cached decoy was not substituted"
@@ -437,7 +445,7 @@ fi
 make_stub "$WORK/clean/plugins/memory-mirror/hooks/supply-ground.sh"
 TABLE_2ND="printf '%s\n' '9992 9990 bash test' '9990 1 /bin/claude --plugin-dir $WORK/clean/plugins/hotline --plugin-dir $WORK/clean/plugins/memory-mirror --setting-sources user'"
 LAST_OUT="$(MM_PREFLIGHT_PS="$TABLE_2ND" MM_PREFLIGHT_START_PID=9992 bash "$SCRIPT" --legs facts 2>&1 || true)"
-if echo "$LAST_OUT" | grep -qF "$WORK/clean/plugins/memory-mirror/hooks/supply-ground.sh"; then
+if grep -qF "$WORK/clean/plugins/memory-mirror/hooks/supply-ground.sh" <<<"$LAST_OUT"; then
   pass "extractor: picks memory-mirror even when it is not the first --plugin-dir"
 else
   fail "extractor: second --plugin-dir wins by name, not position" "out='$LAST_OUT'"
@@ -453,7 +461,7 @@ fi
 make_stub "$WORK/first/plugins/memory-mirror/hooks/supply-ground.sh"
 TABLE_1ST="printf '%s\n' '9992 9990 bash test' '9990 1 /bin/claude --plugin-dir $WORK/first/plugins/memory-mirror --plugin-dir $WORK/first/plugins/hotline --setting-sources user'"
 LAST_OUT="$(MM_PREFLIGHT_PS="$TABLE_1ST" MM_PREFLIGHT_START_PID=9992 bash "$SCRIPT" --legs facts 2>&1 || true)"
-if echo "$LAST_OUT" | grep -qF "$WORK/first/plugins/memory-mirror/hooks/supply-ground.sh"; then
+if grep -qF "$WORK/first/plugins/memory-mirror/hooks/supply-ground.sh" <<<"$LAST_OUT"; then
   pass "extractor: memory-mirror FIRST of several resolves (trailing space stripped)"
 else
   fail "extractor: first-of-several must not carry a trailing space" "out='$LAST_OUT'"
@@ -468,7 +476,7 @@ make_stub "$CH/1.0.0/hooks/supply-ground.sh"
 make_stub "$CH/2.0.0/hooks/supply-ground.sh"
 TABLE_BARE2="printf '%s\n' '9992 9990 bash test' '9990 1 /bin/claude'"
 if LAST_OUT="$(MM_PREFLIGHT_PS="$TABLE_BARE2" MM_PREFLIGHT_START_PID=9992 HOME="$WORK/cachehome" bash "$SCRIPT" --legs facts 2>&1)"; then LAST_RC=0; else LAST_RC=$?; fi
-if [ "$LAST_RC" -eq 1 ] && echo "$LAST_OUT" | grep -q '2 cached copies'; then
+if [ "$LAST_RC" -eq 1 ] && grep -q '2 cached copies' <<<"$LAST_OUT"; then
   pass "cache: two cached versions => refuses and names both"
 else
   fail "cache: multiple versions => exit 1" "rc=$LAST_RC out='$LAST_OUT'"
@@ -479,7 +487,7 @@ fi
 CH1="$WORK/cachehome1/.claude/plugins/cache/mollow-local/memory-mirror/1.0.0/hooks"
 make_stub "$CH1/supply-ground.sh"
 LAST_OUT="$(MM_PREFLIGHT_PS="$TABLE_BARE2" MM_PREFLIGHT_START_PID=9992 HOME="$WORK/cachehome1" bash "$SCRIPT" --legs facts 2>&1 || true)"
-if echo "$LAST_OUT" | grep -q 'marketplace cache'; then
+if grep -q 'marketplace cache' <<<"$LAST_OUT"; then
   pass "cache: exactly one cached copy resolves through the cache path"
 else
   fail "cache: single copy resolves" "out='$LAST_OUT'"
@@ -491,13 +499,13 @@ fi
 # only the server half would stand in for a half-configured demo.
 set_context 'Mollow supply mode handed you POINTERS, not content.'
 LAST_OUT="$(MM_PREFLIGHT_HOOK="$STUB" bash "$SCRIPT" --legs pointer 2>&1 || true)"
-if echo "$LAST_OUT" | grep -q 'MOLLOW_SUPPLY_POINTER_MODE is UNSET here'; then
+if grep -q 'MOLLOW_SUPPLY_POINTER_MODE is UNSET here' <<<"$LAST_OUT"; then
   pass "client opt-in: unset in the environment is stated next to a served pointer leg"
 else
   fail "client opt-in: unset is reported" "out='$LAST_OUT'"
 fi
 LAST_OUT="$(MM_PREFLIGHT_HOOK="$STUB" MOLLOW_SUPPLY_POINTER_MODE=on bash "$SCRIPT" --legs pointer 2>&1 || true)"
-if echo "$LAST_OUT" | grep -q 'MOLLOW_SUPPLY_POINTER_MODE=on in this environment'; then
+if grep -q 'MOLLOW_SUPPLY_POINTER_MODE=on in this environment' <<<"$LAST_OUT"; then
   pass "client opt-in: set in the environment is reported as set"
 else
   fail "client opt-in: set is reported" "out='$LAST_OUT'"
@@ -509,6 +517,20 @@ if [ "$LAST_RC" -eq 1 ]; then
   pass "usage: an unknown leg is refused"
 else
   fail "usage: unknown leg => exit 1" "rc=$LAST_RC out='$LAST_OUT'"
+fi
+
+# ── the suite's own assertions cannot take SIGPIPE (MOL-8125) ───────────────
+# A `... | grep -q` under `pipefail` reports a MATCH as a failure whenever grep
+# exits before the writer finishes — a race that needs the CI runner's timing and
+# reproduced 0 times in 3000 local runs. Since the race cannot be forced here, this
+# asserts the shape instead: no non-comment line of this file pipes into a quiet grep.
+# Covers separated flags (`grep -E -q`), `--quiet` and `egrep`/`fgrep`. A pipe
+# continued onto the next line is out of reach of a line-based scan.
+piped_quiet_greps="$(grep -nE '\|[[:space:]]*(command[[:space:]]+)?[ef]?grep([[:space:]]+[^|]*)?[[:space:]](-[[:alpha:]]*q|--quiet)' "${BASH_SOURCE[0]}" | grep -vE '^[0-9]+: *#' || true)"
+if [ -z "$piped_quiet_greps" ]; then
+  pass "harness: no assertion pipes into grep -q (pipefail would turn a match into SIGPIPE 141)"
+else
+  fail "harness: piped grep -q under pipefail" "$piped_quiet_greps"
 fi
 
 echo
