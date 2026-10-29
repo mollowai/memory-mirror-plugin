@@ -186,11 +186,16 @@ fi
 #
 # That size boundary is a property of `head -c`, which closes the pipe only after a
 # fixed byte count. It is NOT a general rule: `grep -q` exits at its first match,
-# which can land between a writer's writes at ANY size. `echo "$LAST_OUT" | grep -q`
-# took exactly that SIGPIPE on a ~900-byte output in CI, and `pipefail` turned a
-# matching grep into a FAIL (MOL-8125). Assertions here therefore read LAST_OUT
-# through a here-string, which has no writer process to kill; the guard at the end
-# of the suite keeps the piped form out.
+# which can land between a writer's writes at ANY size — the queue desk traced
+# bash's `echo` builtin issuing three write(2) calls for this ~900-byte output.
+# How the writer then fails depends on its SIGPIPE disposition: at the default it
+# is killed and exits 141 silently; where SIGPIPE is IGNORED, as on the Actions
+# runner, the write returns EPIPE, `echo` prints "write error: Broken pipe" and
+# returns 1. Either status is nonzero, so `pipefail` turns a matching grep into a
+# FAIL. CI printed that message at the `echo "$LAST_OUT" | grep -q` site, i.e. the
+# EPIPE/1 case (MOL-8125). Assertions here therefore read LAST_OUT through a
+# here-string, which has no writer process to fail; the guard at the end of the
+# suite keeps the piped form out.
 BIG_CTX="$WORK/big.txt"
 { printf 'Facts from your memory that may bear on this request'; head -c 200000 /dev/zero | tr '\0' 'a'; } >"$BIG_CTX"
 cp "$BIG_CTX" "$STUB_DIR/context.txt"
@@ -519,16 +524,17 @@ else
   fail "usage: unknown leg => exit 1" "rc=$LAST_RC out='$LAST_OUT'"
 fi
 
-# ── the suite's own assertions cannot take SIGPIPE (MOL-8125) ───────────────
+# ── the suite's own assertions cannot lose their writer (MOL-8125) ──────────
 # A `... | grep -q` under `pipefail` reports a MATCH as a failure whenever grep
-# exits before the writer finishes — a race that needs the CI runner's timing and
+# exits before the writer finishes (SIGPIPE 141, or EPIPE 1 where SIGPIPE is
+# ignored) — a race that needs the CI runner's timing and
 # reproduced 0 times in 3000 local runs. Since the race cannot be forced here, this
 # asserts the shape instead: no non-comment line of this file pipes into a quiet grep.
 # Covers separated flags (`grep -E -q`), `--quiet` and `egrep`/`fgrep`. A pipe
 # continued onto the next line is out of reach of a line-based scan.
 piped_quiet_greps="$(grep -nE '\|[[:space:]]*(command[[:space:]]+)?[ef]?grep([[:space:]]+[^|]*)?[[:space:]](-[[:alpha:]]*q|--quiet)' "${BASH_SOURCE[0]}" | grep -vE '^[0-9]+: *#' || true)"
 if [ -z "$piped_quiet_greps" ]; then
-  pass "harness: no assertion pipes into grep -q (pipefail would turn a match into SIGPIPE 141)"
+  pass "harness: no assertion pipes into grep -q (pipefail would turn a match into a writer's 141 or EPIPE 1)"
 else
   fail "harness: piped grep -q under pipefail" "$piped_quiet_greps"
 fi
