@@ -339,11 +339,12 @@ mm_supply_enabled() {
 }
 
 # True when pointer mode is opted in for this machine. A SECOND opt-in on top of
-# mm_supply_enabled, mirroring the server's own split: `supply_mode` gates whether
-# the endpoint answers at all, `pointer_mode` gates whether "pointer" is even in
-# the mode vocabulary. Off here means the hooks keep asking for `facts` exactly as
-# before, so turning pointer mode on server-side changes nothing on this machine
-# until this is set too.
+# mm_supply_enabled. It was added to mirror a server-side split: `supply_mode`
+# gates whether the endpoint answers at all, and `pointer_mode` gated whether
+# "pointer" was in the mode vocabulary. Servers since MOL-7130 offer "pointer" to
+# every caller `supply_mode` admits; older servers still gate it per actor. Off
+# here means the hooks keep asking for `facts` exactly as before, whatever the
+# server offers.
 #
 # Both guards are read before stdin and before any curl, for the same reason
 # mm_supply_enabled is: the 2s budget is spent whether or not the server answers.
@@ -665,7 +666,7 @@ mm_grounding_status_hint() {
           printf 'Mollow supply mode: the grounding request was rejected (422 query_required). The prompt was empty once trimmed, so there was nothing to ground. This is not a configuration problem.'
           ;;
         invalid_mode)
-          printf 'Mollow supply mode: the grounding request was rejected (422 invalid_mode). pointer_mode is off for your actor, so "pointer" is not in the mode vocabulary. That is not a 404 and enabling supply_mode alone will not fix it.'
+          printf 'Mollow supply mode: the grounding request was rejected (422 invalid_mode). The mode is not one this server knows: check the spelling (prompt, facts, pointer, mixed). An older Mollow server also refuses "pointer" this way when pointer mode is not switched on for your actor. That is not a 404, and enabling supply_mode will not fix it.'
           ;;
         request_required)
           printf 'Mollow supply mode: the grounding request was rejected (422 request_required). prompt mode needs a model request body to ground.'

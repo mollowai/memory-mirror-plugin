@@ -1368,7 +1368,7 @@ unset CURL_STATUS
 # was wrong in a way a single fixture could not show: naming invalid_mode blamed
 # pointer_mode for a blank query, and in FACTS mode invalid_mode is not reachable
 # at all, so the guess was wrong for every 422 that path can produce.
-for pair in "query_required:trimmed" "invalid_mode:pointer_mode" "request_required:prompt mode"; do
+for pair in "query_required:trimmed" "invalid_mode:spell" "request_required:prompt mode"; do
   ty="${pair%%:*}"; want="${pair#*:}"
   reset_case
   export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
@@ -1377,7 +1377,8 @@ for pair in "query_required:trimmed" "invalid_mode:pointer_mode" "request_requir
   export CURL_BODY_FILE="$CASE/e422.json"
   run_hook "supply-ground.sh" "{\"prompt\":\"q\",\"session_id\":\"sess-422-$ty\",\"cwd\":\"/tmp\"}"
   E22="$(printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext // ""' 2>/dev/null)"
-  if [ "$LAST_RC" -eq 0 ] && printf '%s' "$E22" | grep -qF "$ty" && printf '%s' "$E22" | grep -qF "$want"; then
+  if [ "$LAST_RC" -eq 0 ] && printf '%s' "$E22" | grep -qF "$ty" && printf '%s' "$E22" | grep -qF "$want" \
+    && ! printf '%s' "$E22" | grep -qF "pointer_mode is off"; then
     pass "status: a 422 $ty names its own cause, not a guessed one"
   else
     fail "status: 422 $ty must name its own cause" "rc=$LAST_RC want='$want' ctx='$E22'"

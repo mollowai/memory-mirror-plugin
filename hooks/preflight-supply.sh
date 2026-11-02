@@ -13,12 +13,15 @@
 # and response; the only readable text is the file name." A green facts-mode
 # pre-flight says nothing about it.
 #
-# The two modes do not even fail the same way. `pointer` needs a SECOND
-# server-side flag (`pointer_mode`) that gates the accepted mode VOCABULARY
-# rather than the endpoint, so asking for it while the flag is off is
-# `422 invalid_mode` — NOT the `404` that a disabled `supply_mode` returns. An
-# operator who has only ever seen one of those two shapes cannot tell them apart
-# when it matters, so this runs both legs and names which shape came back.
+# The two modes did not even fail the same way. On a server older than MOL-7130,
+# `pointer` needs a SECOND server-side flag (`pointer_mode`) that gates the
+# accepted mode VOCABULARY rather than the endpoint, so asking for it while the
+# flag is off is `422 invalid_mode` — NOT the `404` that a disabled `supply_mode`
+# returns. Since MOL-7130 every caller `supply_mode` admits has "pointer", so on
+# a current server `422 invalid_mode` means a misspelled (or non-string) mode.
+# Either way an operator who has only ever seen one of those two shapes cannot
+# tell them apart when it matters, so this runs both legs and names which shape
+# came back.
 #
 # ── 2. Which COPY of the hook runs depends on the launcher, and guessing is silent ─
 #
@@ -98,7 +101,9 @@ usage: preflight-supply.sh [options]
 
 CLASS is one of:
   served          a grounding came back and context was injected
-  invalid_mode    422 invalid_mode — pointer_mode is off for this actor
+  invalid_mode    422 invalid_mode — the mode name is not one this server
+                  knows (a typo); an older server also answers this when
+                  pointer mode is not switched on for this actor
   not_found       404 — supply_mode off, bad key, wrong header, or wrong path
   workspace       400/403 — the workspace id is missing or not this key's
   refused         some other stated refusal

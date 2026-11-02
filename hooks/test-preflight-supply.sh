@@ -138,7 +138,7 @@ else
   fail "classify: injected pointers => served" "out='$LAST_OUT'"
 fi
 
-set_context 'Mollow supply mode: the grounding request was rejected (422 invalid_mode). pointer_mode is off for your actor'
+set_context 'Mollow supply mode: the grounding request was rejected (422 invalid_mode). The mode is not one this server knows: check the spelling'
 run_pf --legs pointer
 if grep -q 'pointer *invalid_mode' <<<"$LAST_OUT"; then
   pass "classify: 422 invalid_mode => invalid_mode (not lumped with 404)"
@@ -234,7 +234,7 @@ fi
 set_context 'Mollow supply mode: the grounding request was rejected (422 invalid_mode).'
 run_pf --legs pointer --expect-pointer served
 if [ "$LAST_RC" -eq 2 ]; then
-  pass "expect: pointer_mode off while 'served' expected => exit 2"
+  pass "expect: invalid_mode while 'served' expected => exit 2"
 else
   fail "expect: unmet expectation => exit 2" "rc=$LAST_RC out='$LAST_OUT'"
 fi
