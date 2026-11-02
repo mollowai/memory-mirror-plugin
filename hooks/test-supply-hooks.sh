@@ -1706,7 +1706,10 @@ else
   export LC_ALL="$UTF8_LOCALE"
   # 30,000 of the character above: 30,000 characters (under a 65536 CHARACTER
   # threshold) but 90,000 bytes (over a 65536 BYTE threshold).
-  MULTIBYTE_TEXT="$(yes "$CHAR" | head -n 30000 | tr -d '\n')"
+  # awk, not `yes | head`: yes never stops writing, so it ALWAYS dies of
+  # SIGPIPE once head has its 30,000 lines (MOL-8373). Under this file's
+  # pipefail that made the assignment's status 141 on every run.
+  MULTIBYTE_TEXT="$(awk -v c="$CHAR" 'BEGIN { for (i = 0; i < 30000; i++) printf "%s", c }')"
   MULTIBYTE_LINE='{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"'"$MULTIBYTE_TEXT"' [fact-1]"}]}}'
   stop_case sess-T4F "$TAGGED" "$(usr "q")" "$MULTIBYTE_LINE"
   if printf '%s' "$POSTED" | grep -q '"used_fact_ids":\["mh-one"\]' \
