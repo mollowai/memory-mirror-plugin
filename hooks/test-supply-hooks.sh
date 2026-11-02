@@ -506,8 +506,8 @@ fi
 # The shim logs the full arg vector ("$*"); the JSON body is the last field after
 # "-d ", but grepping the whole log is enough to assert which ids are present.
 POSTED="$(awk 'BEGIN{RS="";} {print}' "$CURL_LOG")"
-if printf '%s' "$POSTED" | grep -q '"grounding_id"' && printf '%s' "$POSTED" | grep -q "mh-one" \
-   && ! printf '%s' "$POSTED" | grep -q "mh-two"; then
+if grep -q '"grounding_id"' <<<"$POSTED" && printf '%s' "$POSTED" | grep -q "mh-one" \
+   && ! grep -q "mh-two" <<<"$POSTED"; then
   pass "stop: used_fact_ids cites the verbatim-quoted fact only (mh-one, not mh-two)"
 else
   fail "stop: used_fact_ids cites verbatim fact only" "posted='$POSTED'"
@@ -541,7 +541,7 @@ JSON
 run_hook "supply-stop.sh" "{\"session_id\":\"sess-STR\",\"transcript_path\":\"$tp\",\"stop_hook_active\":false}"
 if [ "$LAST_RC" -eq 0 ] && grep -q "/grounding/v1/outcome" "$CURL_LOG"; then
   POSTED="$(awk 'BEGIN{RS="";} {print}' "$CURL_LOG")"
-  if printf '%s' "$POSTED" | grep -q "mh-s"; then
+  if grep -q "mh-s" <<<"$POSTED"; then
     pass "stop: bare-string assistant content is handled (no crash, still matches)"
   else
     pass "stop: bare-string assistant content is handled (no crash; match optional)"
@@ -561,7 +561,7 @@ echo '{"grounding_id":"g-nt","grounded_at":100,"facts":[{"citation_key":"mh-nt",
 run_hook "supply-stop.sh" '{"session_id":"sess-NT","transcript_path":"/does/not/exist","stop_hook_active":false}'
 if grep -q "/grounding/v1/outcome" "$CURL_LOG"; then
   POSTED="$(awk 'BEGIN{RS="";} {print}' "$CURL_LOG")"
-  if ! printf '%s' "$POSTED" | grep -q "used_fact_ids"; then
+  if ! grep -q "used_fact_ids" <<<"$POSTED"; then
     pass "stop: unreadable transcript ⇒ posts back but omits used_fact_ids (no guessing)"
   else
     fail "stop: unreadable transcript should omit used_fact_ids" "posted='$POSTED'"
@@ -635,7 +635,7 @@ JSON
 run_hook "supply-stop.sh" "{\"session_id\":\"sess-STALE\",\"transcript_path\":\"$tp\",\"stop_hook_active\":false}"
 POSTS="$(grep -c "/grounding/v1/outcome" "$CURL_LOG" 2>/dev/null || echo 0)"
 POSTED="$(awk 'BEGIN{RS="";} {print}' "$CURL_LOG")"
-if [ "$POSTS" = "1" ] && printf '%s' "$POSTED" | grep -q "g-new" && ! printf '%s' "$POSTED" | grep -q "g-old"; then
+if [ "$POSTS" = "1" ] && grep -q "g-new" <<<"$POSTED" && ! grep -q "g-old" <<<"$POSTED"; then
   pass "stop: only the current turn's receipt is posted; stale receipt discarded"
 else
   fail "stop: only current receipt posted, stale discarded" "posts=$POSTS posted='$POSTED'"
@@ -778,7 +778,7 @@ fi
 # model free to author SQL for a pointer — the defect intact, with a second
 # route beside it. `fetch-postgres` stays CONFIGURED for ad-hoc exploration;
 # what it must not be is named as the way to read a locator.
-if ! printf '%s' "$CTX" | grep -qF "mcp__fetch-postgres__execute_sql"; then
+if ! grep -qF "mcp__fetch-postgres__execute_sql" <<<"$CTX"; then
   pass "pointer: the grounding does NOT route a pointer through execute_sql"
 else
   fail "pointer: the grounding does NOT route a pointer through execute_sql" "ctx='$CTX'"
@@ -796,7 +796,7 @@ fi
 
 # No content crosses. The fixture carries none, so this asserts the WORDING does
 # not invent any — and that the facts-mode phrasing is not reused.
-if ! printf '%s' "$CTX" | grep -qiF "Facts from your memory"; then
+if ! grep -qiF "Facts from your memory" <<<"$CTX"; then
   pass "pointer: does not reuse the facts-mode wording"
 else
   fail "pointer: does not reuse the facts-mode wording" "ctx='$CTX'"
@@ -815,7 +815,7 @@ else
 fi
 
 # Locator kind is named per entry, so the model can pick the right fetch tool.
-if printf '%s' "$CTX" | grep -qF "[file]" && printf '%s' "$CTX" | grep -qF "[sql_row]"; then
+if grep -qF "[file]" <<<"$CTX" && grep -qF "[sql_row]" <<<"$CTX"; then
   pass "pointer: names each locator's kind so the fetch tool can be chosen"
 else
   fail "pointer: names each locator's kind" "ctx='$CTX'"
@@ -828,7 +828,7 @@ fi
 # COUPLING itself — which is the only one of the three that can fail when the two
 # halves drift apart.
 
-if printf '%s' "$CTX" | grep -qF "canonical_form"; then
+if grep -qF "canonical_form" <<<"$CTX"; then
   pass "pointer: the wording names canonical_form"
 else
   fail "pointer: the wording names canonical_form" "ctx='$CTX'"
@@ -861,7 +861,7 @@ fi
 # perturbation in both directions; one direction alone reds nothing.
 INSTR="$(printf '%s' "$CTX" | sed -n '1,/^Entries:/p')"
 instructed=0
-printf '%s' "$INSTR" | grep -qF "canonical_form" && instructed=1
+grep -qF "canonical_form" <<<"$INSTR" && instructed=1
 entry_lines="$(printf '%s' "$CTX" | grep -c '^- ' || true)"
 entries_with_form="$(printf '%s' "$CTX" | grep -c '^- .* canonical_form=[^ ]' || true)"
 if [ "$instructed" -eq 1 ] && [ "$entry_lines" -gt 0 ] && [ "$entry_lines" -eq "$entries_with_form" ]; then
@@ -876,7 +876,7 @@ fi
 # pass — and omitting canonical_form is the dangerous default (#6240), not a
 # neutral one. Asserted on the instruction text rather than on the context, for
 # the reason recorded above.
-if [ "$entries_with_form" -gt 0 ] && printf '%s' "$INSTR" | grep -qF "canonical_form"; then
+if [ "$entries_with_form" -gt 0 ] && grep -qF "canonical_form" <<<"$INSTR"; then
   pass "pointer: entries carrying a form are matched by wording that asks for it"
 else
   fail "pointer: entries carry a form the wording never mentions" \

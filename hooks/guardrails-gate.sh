@@ -302,7 +302,7 @@ scripts/tests/test-${stem}.sh"
   )"
   while IFS= read -r cand; do
     [ -z "$cand" ] && continue
-    if printf '%s\n' "$CHANGED" | grep -Fxq "$cand"; then
+    if grep -Fxq "$cand" <<<"$CHANGED"; then
       return 1
     fi
   done <<EOF
