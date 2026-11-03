@@ -607,10 +607,11 @@ mm_grounding_error_type() {
 # your credential" for all of them sends the operator to the wrong variable —
 # which is the whole failure this function exists to end.
 #
-# There is no 401 clause because this endpoint never returns one: its scope pipes
-# through `:api` ALONE, with no auth plug, and `GroundController` authenticates
-# inside the action and answers 404 rather than 401 so an unauthenticated prober
-# learns nothing. A 401 branch would be advice for a response that cannot arrive.
+# 401 and 404 both read the body (MOL-8420). A current server answers 401
+# credential_missing (no x-mollow-api-key) or 401 invalid_key (unknown or revoked),
+# and 404 not_enabled when the key resolved and supply_mode withholds the actor. A
+# server older than that answered all of them as one 404 not_found, so an untyped
+# 404 keeps the old list of every cause.
 mm_grounding_status_hint() {
   case "${1:-}" in
     200 | 000 | "") printf '' ;;
@@ -646,13 +647,36 @@ mm_grounding_status_hint() {
           ;;
       esac
       ;;
+    401)
+      case "$(mm_grounding_error_type "${2:-}")" in
+        credential_missing)
+          printf 'Mollow supply mode: the grounding request was refused (401 credential_missing). No key reached x-mollow-api-key, which is the header /grounding/v1 reads; it does not read Authorization: Bearer. Check MOLLOW_MEMORY_API_KEY is set.'
+          ;;
+        *)
+          # A key that failed lookup carries `error.hint`; a VALID key of a scope
+          # this rail does not serve (a ledger book key, via TenantRefusal) gets
+          # the same 401 invalid_key without one — so the hint decides which.
+          if [[ -n "$(printf '%s' "${2:-}" | jq -r '.error.hint // empty' 2>/dev/null || true)" ]]; then
+            printf 'Mollow supply mode: the grounding request was refused (401 %s). The key is wrong or revoked — check MOLLOW_MEMORY_API_KEY.' \
+              "$(mm_grounding_error_type "${2:-}")"
+          else
+            printf 'Mollow supply mode: the grounding request was refused (401 %s). The key resolved, but it is a kind /grounding/v1 does not serve (a ledger book key) — use a Space- or workspace-scoped key in MOLLOW_MEMORY_API_KEY.' \
+              "$(mm_grounding_error_type "${2:-}")"
+          fi
+          ;;
+      esac
+      ;;
     404)
+      if [[ "$(mm_grounding_error_type "${2:-}")" == "not_enabled" ]]; then
+        printf 'Mollow supply mode: the grounding request was refused (404 not_enabled). The key is valid, but supply_mode is off for your actor.'
+        return 0
+      fi
       # The PATH is named because it is the one candidate the operator cannot rule
       # out from the message otherwise. The hooks hardcode the wire path and no env
       # var repoints them, so a half-landed path rename 404s identically to a flag
       # being off — and an operator told "flag, key, or header" checks all three,
       # finds them correct, and has nowhere left to look.
-      printf 'Mollow supply mode: the grounding endpoint answered 404 for POST %s/grounding/v1/ground. Either supply_mode is off for your actor, the key is not valid, the credential is in the wrong header (it reads x-mollow-api-key, not Authorization), or that path is not what the router serves — compare it against the scope in webapp/lib/mollow_web/router.ex.' \
+      printf 'Mollow supply mode: the grounding endpoint answered 404 for POST %s/grounding/v1/ground. On a current server that means the path is not what the router serves; on a server older than MOL-8420 it can also mean supply_mode is off for your actor, the key is not valid, or the credential is in the wrong header (it reads x-mollow-api-key, not Authorization). Either way, check that the path is what the router serves — compare it against the scope in webapp/lib/mollow_web/router.ex.' \
         "$(mm_api_base)"
       ;;
     422)

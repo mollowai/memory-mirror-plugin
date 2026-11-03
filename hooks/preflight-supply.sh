@@ -104,7 +104,10 @@ CLASS is one of:
   invalid_mode    422 invalid_mode — the mode name is not one this server
                   knows (a typo); an older server also answers this when
                   pointer mode is not switched on for this actor
-  not_found       404 — supply_mode off, bad key, wrong header, or wrong path
+  credential      401 — no key in x-mollow-api-key, or a wrong or revoked key
+  not_enabled     404 not_enabled — the key is valid; supply_mode is off for it
+  not_found       an untyped 404 — wrong path; on a server older than MOL-8420
+                  also supply_mode off, bad key, or wrong header
   workspace       400/403 — the workspace id is missing or not this key's
   refused         some other stated refusal
   silent          the hook emitted nothing (miss, timeout, or nothing fresh)
@@ -373,6 +376,8 @@ classify() {
   case "$ctx" in
     "") printf 'silent' ;;
     *"422 invalid_mode"*) printf 'invalid_mode' ;;
+    *"(401 "*) printf 'credential' ;;
+    *"(404 not_enabled)"*) printf 'not_enabled' ;;
     *"answered 404"*) printf 'not_found' ;;
     *"400 workspace_not_named"* | *"403 workspace_not_yours"*) printf 'workspace' ;;
     *"handed you POINTERS"* | *"Facts from your memory"*) printf 'served' ;;

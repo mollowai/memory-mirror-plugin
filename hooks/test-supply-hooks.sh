@@ -1419,8 +1419,8 @@ else
 fi
 
 
-# A 404 is what an operator who opted in but has supply_mode off actually gets,
-# and it must not read as an empty register.
+# An untyped 404 is what an operator with supply_mode off got from a server older
+# than MOL-8420, and it must not read as an empty register.
 reset_case
 export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
 export CURL_STATUS=404
@@ -1453,6 +1453,50 @@ if printf '%s' "$E4" | grep -qF "/grounding/v1/ground"; then
   pass "status: a 404 names the full literal wire path it requested"
 else
   fail "status: 404 must name the wire path — a stale path 404s identically" "ctx='$E4'"
+fi
+
+# MOL-8420: a current server names its refusal, and each hint must name ONE cause.
+# Each case also refutes the cause the old shared 404 hint would have offered, so
+# a hint that fell back to the list would fail here.
+supply_hint_for() { # status body -> additionalContext
+  reset_case
+  export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
+  export CURL_STATUS="$1"
+  printf '%s' "$2" >"$CASE/err.json"
+  export CURL_BODY_FILE="$CASE/err.json"
+  run_hook "supply-ground.sh" '{"prompt":"q","session_id":"sess-8420","cwd":"/tmp"}'
+  printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext // ""' 2>/dev/null
+}
+
+H="$(supply_hint_for 404 '{"error":{"type":"not_enabled"}}')"
+if grep -qF "404 not_enabled" <<<"$H" && ! grep -qF "key is not valid" <<<"$H"; then
+  pass "status: 404 not_enabled names the flag and only the flag"
+else
+  fail "status: 404 not_enabled must name the flag alone" "ctx='$H'"
+fi
+
+H="$(supply_hint_for 401 '{"error":{"type":"credential_missing"}}')"
+if grep -qF "x-mollow-api-key" <<<"$H" && grep -qF "Authorization: Bearer" <<<"$H" \
+  && ! grep -qF "supply_mode" <<<"$H"; then
+  pass "status: 401 credential_missing names the header, not the flag"
+else
+  fail "status: 401 credential_missing must name the header" "ctx='$H'"
+fi
+
+H="$(supply_hint_for 401 '{"error":{"type":"invalid_key","hint":"The key in x-mollow-api-key is unknown or revoked."}}')"
+if grep -qF "wrong or revoked" <<<"$H" && ! grep -qF "supply_mode" <<<"$H"; then
+  pass "status: 401 invalid_key with a hint names the key, not the flag"
+else
+  fail "status: 401 invalid_key with a hint must name the key" "ctx='$H'"
+fi
+
+# A valid book key gets 401 invalid_key WITHOUT a hint (TenantRefusal). Telling
+# that caller to replace the key would send them to fix the wrong thing.
+H="$(supply_hint_for 401 '{"error":{"type":"invalid_key"}}')"
+if grep -qF "book key" <<<"$H" && ! grep -qF "wrong or revoked" <<<"$H"; then
+  pass "status: 401 invalid_key with no hint names an unserved scope, not a bad key"
+else
+  fail "status: 401 invalid_key with no hint must not call the key bad" "ctx='$H'"
 fi
 unset CURL_STATUS
 
