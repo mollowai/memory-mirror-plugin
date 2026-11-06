@@ -455,10 +455,10 @@ if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
       # The full name, not the `__verify_fetched_bytes` suffix: a suffix let a
       # same-named tool on another MCP server earn credit without the Mollow
       # verifier running (Greptile, #6449). supply-ground.sh instructs this
-      # exact name, and `mollow-memory` is the server name every launcher
+      # exact name, and `mollow` is the server name every launcher
       # injects. (No apostrophes in here: this is a single-quoted jq program.)
       | [ $blocks[] | select((.type? // "") == "tool_use")
-          | select((.name? // "") == "mcp__mollow-memory__verify_fetched_bytes")
+          | select((.name? // "") == "mcp__mollow__verify_fetched_bytes")
           # `.id` is bound BEFORE the index call: inside `$ok | index(.id)` the
           # argument is evaluated against $ok, not against the block, so it
           # yields null and nothing ever matches — silently, with an empty result.

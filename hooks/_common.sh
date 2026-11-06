@@ -17,7 +17,7 @@
 #
 #   MOLLOW_MEMORY_API_KEY       required. Absent => hooks no-op, silently.
 #                               Falls back to the session root's `.session-config`,
-#                               then the `mollow-memory` Authorization header in
+#                               then the `mollow` Authorization header in
 #                               that same directory's `.mcp.json`.
 #   MOLLOW_MEMORY_URL           the MCP url (…/mcp/v2). The API base is derived
 #                               by stripping the /mcp/v2 suffix. Same two
@@ -265,14 +265,14 @@ mm_resolve_memory_creds() {
   if [ -f "$mcp" ] && [ -r "$mcp" ] && command -v jq >/dev/null 2>&1; then
     local auth url
     if [ -z "${MOLLOW_MEMORY_API_KEY:-}" ]; then
-      auth="$(jq -r '.mcpServers["mollow-memory"].headers.Authorization // empty' "$mcp" 2>/dev/null)" || auth=""
+      auth="$(jq -r '.mcpServers["mollow"].headers.Authorization // empty' "$mcp" 2>/dev/null)" || auth=""
       # The header may or may not carry the scheme; a bare key is still a key.
       auth="${auth#Bearer }"
       auth="${auth#bearer }"
       if [ -n "$auth" ]; then MOLLOW_MEMORY_API_KEY="$auth"; export MOLLOW_MEMORY_API_KEY; fi
     fi
     if [ -z "${MOLLOW_MEMORY_URL:-}" ]; then
-      url="$(jq -r '.mcpServers["mollow-memory"].url // empty' "$mcp" 2>/dev/null)" || url=""
+      url="$(jq -r '.mcpServers["mollow"].url // empty' "$mcp" 2>/dev/null)" || url=""
       if [ -n "$url" ]; then MOLLOW_MEMORY_URL="$url"; export MOLLOW_MEMORY_URL; fi
     fi
   fi

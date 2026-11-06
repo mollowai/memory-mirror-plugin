@@ -202,7 +202,7 @@ fi
 #
 #   mcp__fetch-files__fetch_file            host_agent/lib/host_agent/mcp/fetch_files.ex
 #   mcp__fetch-rows__fetch_row              host_agent/lib/host_agent/mcp/fetch_rows.ex
-#   mcp__mollow-memory__verify_fetched_bytes  webapp/lib/mollow/mcp/pointer_tools.ex
+#   mcp__mollow__verify_fetched_bytes  webapp/lib/mollow/mcp/pointer_tools.ex
 #
 # ## The sql_row lane named `mcp__fetch-postgres__execute_sql` until MOL-6023
 #
@@ -281,7 +281,7 @@ if [ "$mode" = "pointer" ]; then
         + (if ($kinds | index("sql_row")) then ["A `sql_row` locator: call mcp__fetch-rows__fetch_row with that entry'"'"'s uri. Do NOT write SQL for these — that tool issues the statement the row was registered with, which is why its answer can match. Its `bytes` field is the content; pass that value through unchanged."] else [] end)
         ) | join(" ") )
     + " If a tool named here is not available in this session, skip ONLY the entries needing that tool and keep going with the ones you can fetch. NAME the entries you skipped and why, in your answer: an entry you cannot fetch is one you cannot check, and an unchecked pointer is retrieval with extra latency. A silent skip makes a partial answer look like a complete one.\n"
-    + "2. CHECK it. Call mcp__mollow-memory__verify_fetched_bytes with that same entry'"'"'s hash, that same entry'"'"'s canonical_form, and the bytes exactly as they came back — do not trim, re-indent or re-encode them. For a `file` that is the file'"'"'s content; for a `sql_row` it is the fetch tool'"'"'s `bytes` field. Both already carry the form they were hashed in, so reshaping either reports a mismatch on content nobody altered.\n"
+    + "2. CHECK it. Call mcp__mollow__verify_fetched_bytes with that same entry'"'"'s hash, that same entry'"'"'s canonical_form, and the bytes exactly as they came back — do not trim, re-indent or re-encode them. For a `file` that is the file'"'"'s content; for a `sql_row` it is the fetch tool'"'"'s `bytes` field. Both already carry the form they were hashed in, so reshaping either reports a mismatch on content nobody altered.\n"
     + "Pass canonical_form every time. Leaving it out does not fail — it widens the check to every record sharing that hash anywhere, so it can report a match from a record that is not yours while your own entry does not match.\n"
     + "Keep the hash, the canonical_form and the bytes from the SAME entry. Pairing one entry'"'"'s hash with another'"'"'s bytes reports a mismatch that is not real.\n\n"
     + "Entries:\n"

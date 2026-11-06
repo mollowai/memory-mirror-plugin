@@ -2,7 +2,7 @@
 set -euo pipefail
 # Stop: the ingestion-backfill leg. Summarizing a whole session inherently needs
 # the model, so this nudges Claude to call sync_session_context via the in-session
-# mollow-memory MCP server. The deterministic capture-decision hook already
+# mollow MCP server. The deterministic capture-decision hook already
 # persisted the discrete AskUserQuestion decisions in real time; this catches the
 # free-form ones (lessons, rejected approaches) the real-time hook can't see.
 #
@@ -62,7 +62,7 @@ else
   id_clause="using \$CLAUDE_CODE_SESSION_ID as session_id (fall back to the project dir name + date only when it is unset)"
 fi
 
-reason="Reminder: save durable findings with remember first, then call sync_session_context (mollow-memory MCP) before ending — summarize what was accomplished, key decisions, files changed, and lessons, ${id_clause}. Pass project = the project dir BASENAME (not the repo URL): it is the scope the summary is filed under, and re-syncing the same summary does not move it."
+reason="Reminder: save durable findings with remember first, then call sync_session_context (mollow MCP) before ending — summarize what was accomplished, key decisions, files changed, and lessons, ${id_clause}. Pass project = the project dir BASENAME (not the repo URL): it is the scope the summary is filed under, and re-syncing the same summary does not move it."
 
 # Record the nudge before emitting it so a follow-up stop won't repeat it. Best-
 # effort: if the marker can't be written we still nudge (a repeat reminder beats

@@ -1,4 +1,4 @@
 {
-  "_comment": "The memory server is injected per-session as a project-level `mollow-memory` server (staging URL + mol_* key header) by the monorepo's session launchers — NOT bundled here. Bundling it would (a) ship a URL/secret to the public plugin repo, and (b) register a namespaced server that project config can't override. The plugin contributes only skills + the deterministic hooks.",
+  "_comment": "The memory server is injected per-session as a project-level `mollow` server (staging URL + mol_* key header) by the monorepo's session launchers — NOT bundled here. Bundling it would (a) ship a URL/secret to the public plugin repo, and (b) register a namespaced server that project config can't override. The plugin contributes only skills + the deterministic hooks.",
   "mcpServers": {}
 }

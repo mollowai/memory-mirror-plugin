@@ -88,7 +88,7 @@ keys on `content`. (MOL-6187; before it, `push` never passed `--repo` at all.)
              pass any `message_hash` to verify_stored_memory to confirm that row landed
    ```
 
-   Pass one to `mcp__mollow-memory__verify_stored_memory`. **Be precise about what
+   Pass one to `mcp__mollow__verify_stored_memory`. **Be precise about what
    that answers:**
 
    | it establishes | it does NOT establish |

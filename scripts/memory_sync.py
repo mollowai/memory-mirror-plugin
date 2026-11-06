@@ -248,7 +248,7 @@ def read_keyfile(path=None):
 
 
 def read_mcp_config_url():
-    """Best-effort: the mollow-memory MCP server URL from ~/.claude.json."""
+    """Best-effort: the mollow MCP server URL from ~/.claude.json."""
     try:
         data = json.loads(CLAUDE_JSON.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -258,7 +258,7 @@ def read_mcp_config_url():
 
 def _find_mollow_memory_url(node):
     if isinstance(node, dict):
-        server = node.get("mollow-memory")
+        server = node.get("mollow")
         if isinstance(server, dict) and isinstance(server.get("url"), str):
             return server["url"]
         for value in node.values():

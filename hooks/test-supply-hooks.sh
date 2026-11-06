@@ -148,7 +148,7 @@ ptr_transcript() {
   : >"$out"
   if [ -n "$hash" ]; then
     jq -cn --arg h "$hash" --arg ts "$ts" '{timestamp:$ts,type:"assistant",message:{content:[
-      {type:"tool_use",id:"tu_1",name:"mcp__mollow-memory__verify_fetched_bytes",input:{hash:$h,bytes:"..."}}]}}' >>"$out"
+      {type:"tool_use",id:"tu_1",name:"mcp__mollow__verify_fetched_bytes",input:{hash:$h,bytes:"..."}}]}}' >>"$out"
     if [ "${6:-string}" = "array" ]; then
       jq -cn --arg o "$outcome" --arg ts "$ts" '{timestamp:$ts,type:"user",message:{content:[
         {type:"tool_result",tool_use_id:"tu_1",content:[{type:"text",text:("{\"outcome\":\"" + $o + "\"}")}]}]}}' >>"$out"
@@ -764,7 +764,7 @@ CTX="$(printf '%s' "$LAST_OUT" | jq -r '.hookSpecificOutput.additionalContext //
 # to build the canonical JSON array itself, which IS the re-encoding step 2
 # forbids.
 missing=""
-for t in "mcp__fetch-files__fetch_file" "mcp__fetch-rows__fetch_row" "mcp__mollow-memory__verify_fetched_bytes"; do
+for t in "mcp__fetch-files__fetch_file" "mcp__fetch-rows__fetch_row" "mcp__mollow__verify_fetched_bytes"; do
   printf '%s' "$CTX" | grep -qF "$t" || missing="$missing $t"
 done
 if [ -z "$missing" ]; then
@@ -1088,7 +1088,7 @@ ptr_call() {
   jq -cn --arg id "$id" --arg r "$result" --arg ts "$ts" \
     '{timestamp:$ts,type:"user",message:{content:[{type:"tool_result",tool_use_id:$id,content:$r}]}}' >>"$out"
 }
-VERIFY_TOOL="mcp__mollow-memory__verify_fetched_bytes"
+VERIFY_TOOL="mcp__mollow__verify_fetched_bytes"
 
 # Greptile #6414 (supply-stop.sh:193): credit was a SUBSTRING test over every
 # successful call's joined input. A verify of A whose `bytes` happen to contain
@@ -1129,8 +1129,8 @@ fi
 
 # Greptile #6449: matching on the `__verify_fetched_bytes` SUFFIX let another MCP
 # server's same-named tool earn credit without Mollow's verifier ever running.
-# The grounding instructions name mcp__mollow-memory__verify_fetched_bytes, and
-# `mollow-memory` is the server name every launcher injects.
+# The grounding instructions name mcp__mollow__verify_fetched_bytes, and
+# `mollow` is the server name every launcher injects.
 reset_case
 export MOLLOW_SUPPLY_MODE=on MOLLOW_SUPPLY_POINTER_MODE=on
 export CURL_BODY_FILE="$CASE/outcome.json"; echo '{"status":"ok"}' >"$CASE/outcome.json"
@@ -1143,7 +1143,7 @@ run_hook "supply-stop.sh" "{\"session_id\":\"sess-OV\",\"transcript_path\":\"$to
 if grep -q "g-ov-1" "$CURL_LOG" && ! grep -q "rec-ov" "$CURL_LOG"; then
   pass "pointer stop: another server's verify_fetched_bytes does not credit"
 else
-  fail "pointer stop: only mollow-memory's verifier can credit" "log='$(cat "$CURL_LOG")'"
+  fail "pointer stop: only mollow's verifier can credit" "log='$(cat "$CURL_LOG")'"
 fi
 
 # And the outcome is the TOP-LEVEL one. A named-form mismatch lists the forms

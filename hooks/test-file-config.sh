@@ -175,7 +175,7 @@ r=$(probe mm_ready "printf 'export MOLLOW_MEMORY_API_KEY=%s\n' '$FAKE_KEY' > \"\
 expect_rc "ready: key from .session-config ⇒ 0" 0 "$r"
 
 r=$(probe mm_ready "cat > \"\$CLAUDE_PROJECT_DIR/.mcp.json\" <<'J'
-{\"mcpServers\":{\"mollow-memory\":{\"type\":\"http\",\"url\":\"https://mollow.ai/mcp/v2\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
+{\"mcpServers\":{\"mollow\":{\"type\":\"http\",\"url\":\"https://mollow.ai/mcp/v2\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
 J")
 expect_rc "ready: key from .mcp.json Authorization ⇒ 0" 0 "$r"
 
@@ -183,7 +183,7 @@ expect_rc "ready: key from .mcp.json Authorization ⇒ 0" 0 "$r"
 # URL that would fail validation — so if precedence is wrong, rc flips.
 r=$(probe mm_ready "printf 'export MOLLOW_MEMORY_API_KEY=%s\nexport MOLLOW_MEMORY_URL=%s\n' '$FAKE_KEY' 'https://staging.mollow.ai/mcp/v2' > \"\$CLAUDE_PROJECT_DIR/.session-config\"
 cat > \"\$CLAUDE_PROJECT_DIR/.mcp.json\" <<'J'
-{\"mcpServers\":{\"mollow-memory\":{\"type\":\"http\",\"url\":\"http://evil.example.com/mcp/v2\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
+{\"mcpServers\":{\"mollow\":{\"type\":\"http\",\"url\":\"http://evil.example.com/mcp/v2\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
 J")
 expect_rc "ready: .session-config URL beats .mcp.json URL ⇒ 0" 0 "$r"
 
@@ -191,32 +191,32 @@ expect_rc "ready: .session-config URL beats .mcp.json URL ⇒ 0" 0 "$r"
 # from the environment would be. Resolution happens before the guards, not
 # instead of them.
 r=$(probe mm_ready "cat > \"\$CLAUDE_PROJECT_DIR/.mcp.json\" <<'J'
-{\"mcpServers\":{\"mollow-memory\":{\"type\":\"http\",\"url\":\"http://evil.example.com/mcp/v2\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
+{\"mcpServers\":{\"mollow\":{\"type\":\"http\",\"url\":\"http://evil.example.com/mcp/v2\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
 J")
 expect_rc "ready: non-HTTPS URL from .mcp.json ⇒ REFUSED" 1 "$r"
 
 r=$(probe mm_ready "cat > \"\$CLAUDE_PROJECT_DIR/.mcp.json\" <<'J'
-{\"mcpServers\":{\"mollow-memory\":{\"type\":\"http\",\"url\":\"https://mollow.ai/v1\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
+{\"mcpServers\":{\"mollow\":{\"type\":\"http\",\"url\":\"https://mollow.ai/v1\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
 J")
 expect_rc "ready: URL from .mcp.json missing /mcp/v2 ⇒ REFUSED" 1 "$r"
 
 # A loopback http URL is still allowed from a file, same as from the env.
 r=$(probe mm_ready "cat > \"\$CLAUDE_PROJECT_DIR/.mcp.json\" <<'J'
-{\"mcpServers\":{\"mollow-memory\":{\"type\":\"http\",\"url\":\"http://localhost:4000/mcp/v2\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
+{\"mcpServers\":{\"mollow\":{\"type\":\"http\",\"url\":\"http://localhost:4000/mcp/v2\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
 J")
 expect_rc "ready: loopback http from .mcp.json ⇒ 0" 0 "$r"
 
-# A .mcp.json with no mollow-memory server, and a malformed one, must both be
+# A .mcp.json with no mollow server, and a malformed one, must both be
 # misses rather than crashes.
 r=$(probe mm_ready "printf '%s' '{\"mcpServers\":{\"github\":{}}}' > \"\$CLAUDE_PROJECT_DIR/.mcp.json\"")
-expect_rc "ready: .mcp.json without mollow-memory ⇒ 1" 1 "$r"
+expect_rc "ready: .mcp.json without mollow ⇒ 1" 1 "$r"
 
 r=$(probe mm_ready "printf '%s' 'not json at all {{{' > \"\$CLAUDE_PROJECT_DIR/.mcp.json\"")
 expect_rc "ready: malformed .mcp.json ⇒ 1, no crash" 1 "$r"
 
 # A bare key with no "Bearer " prefix is still a key.
 r=$(probe mm_ready "cat > \"\$CLAUDE_PROJECT_DIR/.mcp.json\" <<'J'
-{\"mcpServers\":{\"mollow-memory\":{\"url\":\"https://mollow.ai/mcp/v2\",\"headers\":{\"Authorization\":\"$FAKE_KEY\"}}}}
+{\"mcpServers\":{\"mollow\":{\"url\":\"https://mollow.ai/mcp/v2\",\"headers\":{\"Authorization\":\"$FAKE_KEY\"}}}}
 J")
 expect_rc "ready: Authorization without a Bearer prefix ⇒ 0" 0 "$r"
 
@@ -306,7 +306,7 @@ leaked=0
 for setup in \
   "printf 'export MOLLOW_MEMORY_API_KEY=%s\n' '$FAKE_KEY' > \"\$CLAUDE_PROJECT_DIR/.session-config\"" \
   "cat > \"\$CLAUDE_PROJECT_DIR/.mcp.json\" <<'J'
-{\"mcpServers\":{\"mollow-memory\":{\"url\":\"http://evil.example.com/mcp/v2\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
+{\"mcpServers\":{\"mollow\":{\"url\":\"http://evil.example.com/mcp/v2\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
 J" \
   ; do
   r=$(probe mm_ready "$setup")
@@ -321,7 +321,7 @@ done
 # it still does — a fix that silenced it would make a misconfigured URL as hard
 # to diagnose as the original bug.
 r=$(probe mm_ready "cat > \"\$CLAUDE_PROJECT_DIR/.mcp.json\" <<'J'
-{\"mcpServers\":{\"mollow-memory\":{\"url\":\"http://evil.example.com/mcp/v2\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
+{\"mcpServers\":{\"mollow\":{\"url\":\"http://evil.example.com/mcp/v2\",\"headers\":{\"Authorization\":\"Bearer $FAKE_KEY\"}}}}
 J")
 if printf '%s' "$(out_of "$r")" | grep -q "evil.example.com"; then
   pass "refusal still names the offending URL"

@@ -28,7 +28,7 @@ memory with full provenance, so they're searchable across every AI they use.
 
 2. If the array is empty, tell the user there's nothing to import and stop.
 
-3. Call the **`import_claude_memories`** tool from the `mollow-memory` MCP server,
+3. Call the **`import_claude_memories`** tool from the `mollow` MCP server,
    passing the parsed objects as `entries`. Each object already has its `content`
    and `type` set — **pass them through unchanged** (do not re-classify). If there
    are more than 50 entries, split into chunks of 50 and call the tool once per

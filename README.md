@@ -239,7 +239,7 @@ call committed.
 (so business/financial notes can stay local) is tracked in MOL-2708.
 
 To switch which env everything reports to — `selected-env`, `.envrc`, the
-workers, and `~/.claude.json`'s `mollow-memory` MCP URL, all at once — use
+workers, and `~/.claude.json`'s `mollow` MCP URL, all at once — use
 `scripts/fleet-target.sh <dev|staging|prod>`.
 
 ## Requirements
