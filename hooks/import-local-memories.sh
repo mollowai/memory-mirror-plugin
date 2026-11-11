@@ -25,10 +25,92 @@ cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
 [ -z "$cwd" ] && exit 0
 
 # Claude Code names a project dir by its abs path with / and . turned to -.
-slug="$(printf '%s' "$cwd" | sed 's/[/.]/-/g')"
-mem_dir="${HOME}/.claude/projects/${slug}/memory"
-[ -d "$mem_dir" ] || exit 0
-ls "$mem_dir"/*.md >/dev/null 2>&1 || exit 0
+mm_slug_of() { printf '%s' "$1" | sed 's/[/.]/-/g'; }
+
+# Resolving the memory dir takes two axes. Only the second was a MEASURED defect
+# (2026-11-10, from a worktree of this repo: the hook exited 0 at the directory
+# check and so neither imported nor nudged, with 1816 memory files sitting one
+# slug away):
+#
+#   * SLUG — the defect. In a git WORKTREE, the session's cwd is not the path the
+#     harness slugged the memory dir from: that is the PRIMARY checkout, which
+#     lives somewhere else entirely, so the cwd slug matched no directory at all.
+#     cwd is tried first and the primary checkout's slug second.
+#   * ROOT — defensive, not measured. A Mollow-managed account addresses its
+#     projects as `~/.mollow/account-stores/<account>/projects`, which on the
+#     host this was found on is a SYMLINK to `~/.claude/projects` — so the
+#     single hardcoded root did reach it, and the account path alone never broke
+#     anything here. It is a candidate because the account layout is the
+#     documented one and the glob costs a stat, not because a host is known to
+#     keep them separate. The account segment is a glob because it names the
+#     account, not a constant.
+#
+# Order matters: cwd before primary, and Claude Code's root before the account
+# stores, so a project with its own memories keeps them rather than inheriting
+# the primary checkout's. First hit wins and resolution stops.
+#
+# Still silent when nothing matches — the hook must never block a session, and a
+# project with no memories is the overwhelmingly common case, not an error.
+mm_resolve_memory_dir() { # $1 = cwd; prints the memory dir, or returns 1
+  local cwd="$1" root slug dir gitdir primary alt
+  local slugs
+  slugs="$(mm_slug_of "$cwd")"
+
+  # `--git-common-dir` is the primary checkout's .git from inside a worktree and
+  # a plain `.git` from the main checkout; resolve both to an absolute path. Not
+  # `--path-format=absolute`, which needs git >= 2.31.
+  gitdir="$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [ -n "$gitdir" ]; then
+    case "$gitdir" in
+      /*) primary="$(cd "$(dirname "$gitdir")" 2>/dev/null && pwd || true)" ;;
+      *)  primary="$(cd "$cwd" 2>/dev/null && cd "$(dirname "$gitdir")" 2>/dev/null && pwd || true)" ;;
+    esac
+    if [ -n "${primary:-}" ] && [ "$primary" != "$cwd" ]; then
+      slugs="${slugs}
+$(mm_slug_of "$primary")"
+      # git reports the primary PHYSICALLY, the harness slugs the path AS GIVEN,
+      # and under a symlink those differ: measured 2026-11-10, a worktree whose
+      # primary was `/var/.../primary` got `/private/var/.../primary` back, for a
+      # slug that matches no directory. `/var`, `/tmp` and `/etc` are symlinks
+      # into `/private` on macOS, so this is reachable for any checkout there.
+      #
+      # The alternative is only tried once it is PROVED to name the same
+      # directory — `pwd -P` on it must come back as the physical path we
+      # already have. A platform assumption would guess; this measures.
+      if [ "${primary#/private/}" != "$primary" ]; then
+        alt="/${primary#/private/}"
+        if [ -d "$alt" ] && [ "$(cd "$alt" 2>/dev/null && pwd -P || true)" = "$primary" ]; then
+          slugs="${slugs}
+$(mm_slug_of "$alt")"
+        fi
+      fi
+    fi
+  fi
+
+  for root in "${HOME}/.claude/projects" "${HOME}"/.mollow/account-stores/*/projects; do
+    [ -d "$root" ] || continue
+    while IFS= read -r slug; do
+      [ -n "$slug" ] || continue
+      dir="${root}/${slug}/memory"
+      # A directory with no *.md is not a memory dir: treating it as one would
+      # extract nothing and nudge about memories that do not exist.
+      if [ -d "$dir" ] && ls "$dir"/*.md >/dev/null 2>&1; then
+        printf '%s' "$dir"
+        return 0
+      fi
+    done <<<"$slugs"
+  done
+  return 1
+}
+
+mem_dir="$(mm_resolve_memory_dir "$cwd" || true)"
+[ -n "$mem_dir" ] || exit 0
+
+# The slug comes from the RESOLVED dir, not from cwd. It keys the sync state
+# below, and the extractor independently derives the same value from the same
+# directory (`slug = mdir.parent.name`), so taking it from cwd would file the
+# fingerprint under a name that no longer describes what was read.
+slug="$(basename "$(dirname "$mem_dir")")"
 
 # `repo` is the destination map's key; `project` beside it stays the directory
 # slug. Derived with the same `mm_repo_of` the decision hooks use, so all three
@@ -98,9 +180,9 @@ python_bin="$(command -v python3 || true)"
 # ── Keyed silent mode: parse + POST directly ────────────────────────────────
 if mm_ready && [ -n "$python_bin" ]; then
   if [ -n "$mm_repo" ]; then
-    entries="$("$python_bin" "$DIR/../scripts/extract-local-memories.py" --project "$cwd" --repo "$mm_repo" 2>/dev/null || true)"
+    entries="$("$python_bin" "$DIR/../scripts/extract-local-memories.py" --dir "$mem_dir" --repo "$mm_repo" 2>/dev/null || true)"
   else
-    entries="$("$python_bin" "$DIR/../scripts/extract-local-memories.py" --project "$cwd" 2>/dev/null || true)"
+    entries="$("$python_bin" "$DIR/../scripts/extract-local-memories.py" --dir "$mem_dir" 2>/dev/null || true)"
   fi
   if [ -n "$entries" ] && [ "$entries" != "[]" ]; then
     # Server caps a batch at 100 — chunk and POST each. Backgrounded so
@@ -133,13 +215,21 @@ fi
 
 count=""
 if [ -n "$python_bin" ]; then
-  count="$("$python_bin" "$DIR/../scripts/extract-local-memories.py" --project "$cwd" 2>/dev/null | jq 'length' 2>/dev/null || true)"
+  count="$("$python_bin" "$DIR/../scripts/extract-local-memories.py" --dir "$mem_dir" 2>/dev/null | jq 'length' 2>/dev/null || true)"
 fi
 
+# The nudge names the RESOLVED directory, and names it as the `--dir` the skill
+# takes. Without that the skill re-derives `<root>/<slug-of-cwd>/memory` on its
+# own — the directory this hook's resolution exists because it does not exist in
+# a worktree. The nudge would then fire correctly, having counted the primary
+# checkout's memories, and send the reader to a command that reports nothing to
+# import; `remember_fingerprint nudged` below would suppress the prompt until the
+# content changed. Passing the path forward is what makes the nudge actionable in
+# precisely the session the resolution above was written for.
 if [ -n "$count" ] && [ "$count" != "0" ]; then
-  msg="You have ${count} local Claude Code memories in this project that may not be synced to Mollow yet. Run the /memory-mirror:import-local-memories skill to import them."
+  msg="You have ${count} local Claude Code memories in this project that may not be synced to Mollow yet. Run the /memory-mirror:import-local-memories skill with --dir ${mem_dir} to import them."
 else
-  msg="This project has local Claude Code memory files that may not be synced to Mollow. Run the /memory-mirror:import-local-memories skill to import them."
+  msg="This project has local Claude Code memory files that may not be synced to Mollow. Run the /memory-mirror:import-local-memories skill with --dir ${mem_dir} to import them."
 fi
 
 mm_emit_context "SessionStart" "$msg"

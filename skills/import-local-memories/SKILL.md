@@ -22,11 +22,21 @@ memory with full provenance, so they're searchable across every AI they use.
    python3 "${CLAUDE_PLUGIN_ROOT}/scripts/extract-local-memories.py" --verbose $ARGUMENTS
    ```
 
-   - Default: just this project. `--all` imports every project's memories.
+   - Default: just this project — which derives the directory from the **current
+     working directory**. In a git worktree that is the wrong directory: the
+     memory dir is named after the PRIMARY checkout, so the default resolves to a
+     path that does not exist and the extractor returns an empty array.
+   - **`--dir <path>` when you were given one.** The `import-local-memories` hook
+     resolves the real directory and names it in its reminder; pass that straight
+     through. Without it this skill re-derives the cwd-based path and reports
+     nothing to import while the memories sit elsewhere on disk.
+   - `--all` imports every project's memories.
    - `--skip-ephemeral` drops host-specific facts (IPs, socket paths, localhost ports).
    - stdout is a JSON array of entries; stderr is a one-line summary.
 
-2. If the array is empty, tell the user there's nothing to import and stop.
+2. If the array is empty, tell the user there's nothing to import and stop —
+   **unless you ran without `--dir` in a worktree**, which produces an empty array
+   whether or not memories exist. Resolve the directory first in that case.
 
 3. Call the **`import_claude_memories`** tool from the `mollow` MCP server,
    passing the parsed objects as `entries`. Each object already has its `content`
