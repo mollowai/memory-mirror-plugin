@@ -779,6 +779,56 @@ mm_emit_context() {
 # Past that budget it still gives up rather than blocking the turn. Under that
 # much contention a dropped key re-shows one advisory once; the guarantee that
 # holds unconditionally is that the file is never left corrupt.
+# A digest of stdin, for change-detection rather than integrity.
+#
+# Same three-way fallback `mm_env_label` already uses, and for the same reason:
+# `shasum` is present on macOS, `sha256sum` on most Linux images, and `cksum` is
+# POSIX. A caller that gets an empty string back must decide what to do about it
+# rather than treat it as "unchanged" — an empty digest compares equal to every
+# other empty digest, which would suppress everything.
+#
+# The `cksum` fallback is a 32-bit CRC, not a secure hash — a ~1-in-4-billion
+# chance of two different inputs colliding. The failure that causes is BOUNDED
+# and worth naming: a false equality suppresses one update, so a caller using
+# this for change detection misses a single injection rather than corrupting
+# anything. It is the last of three branches and only reached on a host with
+# neither shasum nor sha256sum (Claude review CR-A-r1-002).
+mm_digest() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum 2>/dev/null | awk '{print $1}'
+  else
+    cksum 2>/dev/null | awk '{print $1}'
+  fi
+}
+
+# The key cap, normalised — `MM_SEEN_MAX_KEYS` or 200, as a positive base-10
+# integer. Shared by every store that caps keys, so the parsing lessons below
+# live in ONE place rather than being re-learned per copy.
+#
+# Normalised to a NUMBER before the zero test, not pattern-matched against the
+# string `0` (Greptile, #7574). `00` is all digits and is not the string `0`, so
+# a string test lets it through — and jq's parser accepts `00` as JSON, where
+# `.[-0:]` keeps the whole array. The cap would be silently disabled and the file
+# would grow unbounded, which is the exact defect a cap exists to prevent. `10#`
+# also pins base 10, so `010` is ten rather than eight.
+#
+# A malformed value falls back to 200 rather than propagating: a caller that
+# passed it to `--argjson` would make jq fail, and a fallback write can destroy
+# the rest of the file (Greptile on #8140).
+mm_max_keys() {
+  local max_keys="${MM_SEEN_MAX_KEYS:-200}"
+  case "$max_keys" in
+    '' | *[!0-9]*) max_keys=200 ;;
+    # More than 9 digits cannot be a meaningful key cap and risks overflowing
+    # the arithmetic, which would abort a caller running under errexit.
+    *) if [ "${#max_keys}" -gt 9 ]; then max_keys=200; else max_keys=$((10#$max_keys)); fi ;;
+  esac
+  [ "$max_keys" -gt 0 ] || max_keys=200
+  printf '%s' "$max_keys"
+}
+
 mm_seen_add() {
   local file="$1" key="$2" additions="$3"
   local lock="${file}.lock" tmp="${file}.$$"
@@ -850,14 +900,8 @@ mm_seen_add() {
   # where `.[-0:]` keeps the whole array. The cap would be silently disabled and
   # the file would grow unbounded, which is the exact defect the cap exists to
   # prevent. `10#` also pins base 10, so `010` is ten rather than eight.
-  local max_keys="${MM_SEEN_MAX_KEYS:-200}"
-  case "$max_keys" in
-    '' | *[!0-9]*) max_keys=200 ;;
-    # More than 9 digits cannot be a meaningful key cap and risks overflowing
-    # the arithmetic below, which would abort a caller running under errexit.
-    *) if [ "${#max_keys}" -gt 9 ]; then max_keys=200; else max_keys=$((10#$max_keys)); fi ;;
-  esac
-  [ "$max_keys" -gt 0 ] || max_keys=200
+  local max_keys
+  max_keys="$(mm_max_keys)"
 
   if jq -c --arg k "$key" --argjson new "$additions" --argjson maxk "$max_keys" \
     '(. // {})
