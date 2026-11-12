@@ -1571,6 +1571,71 @@ else
   fail "tags: receipt labels" "receipt='$(cat "$RECEIPT" 2>/dev/null)'"
 fi
 
+# ── MOL-8066: the three properties the instruction's strengthening created ────
+#
+# Baseline before the change, measured over 805 credited turns in
+# `~/.mollow/supply-stop-reasons.log` (2026-10-26 to 2026-11-12): the `tag` path
+# carried 25.0%, `run` 72.5%, `short` 2.5%, with a daily band of 11.5-46.8% and
+# no trend across 17 days. `tag` is checked BEFORE `run` in supply-stop.sh, so
+# that 25% is model behaviour and not a precedence artifact — a turn credited by
+# `run` is one where the model did not write the tag.
+#
+# Each assertion below pins one hypothesised cause, so a future edit that
+# reverts it fails here rather than silently returning the share to 25%.
+
+# All three assert with `case` rather than a pipe into `grep -q`. `grep -q`
+# exits on its first match without draining, which SIGPIPEs the producer — the
+# early-exit-pipe shape the repo ratchets against (`test-shell` guard: "50
+# early-exit pipe(s), baseline 46" when these were first written as pipes).
+# `case` reads the variable directly, so it adds nothing to that count, and the
+# match is exact rather than case-folded — stricter, and this file owns the
+# text it is matching.
+
+# (a) The BAR. "relies on" set a high threshold; a fact that merely confirmed
+# something did not feel like reliance, so it went untagged and was credited by
+# the verbatim fallback instead.
+case "$CTX" in
+  *'the bar is USE, not reliance'*)
+    pass "tags: the citation bar is stated as USE rather than reliance" ;;
+  *)
+    fail "tags: instruction must state the use-not-reliance bar" "ctx='$CTX'" ;;
+esac
+
+# (b) The OVER-CREDITING GUARD must survive the loosening in (a). This is the
+# MOL-5936 failure from the other side: an instruction that asks the model to
+# NAME what it skipped makes a skipped fact creditable. Lowering the obligation
+# without keeping this prohibition would inflate the tag share by exactly the
+# facts the model declined.
+case "$CTX" in
+  *'Cite only facts you actually used'*)
+    case "$CTX" in
+      *'write a tag nowhere else'*)
+        pass "tags: the prohibition on tagging an unused fact survives the lowered bar" ;;
+      *)
+        fail "tags: over-crediting guard missing the nowhere-else clause" "ctx='$CTX'" ;;
+    esac ;;
+  *)
+    fail "tags: over-crediting guard missing the only-used clause" "ctx='$CTX'" ;;
+esac
+
+# (c) POSITION. The instruction precedes the entries, and in this harness the
+# block is followed by more injected context before the model answers, so by
+# answer time the ask is distant. A trailing reminder sits closest to the answer.
+# Asserted as an ORDERING, not a presence: moving it back above the entries
+# would keep the string and lose the property.
+# ONE glob states the ordering directly: the last entry, then anything, then
+# the reminder. That is stronger than comparing two line numbers and needs no
+# pipe to compute them — and it cannot pass on a reminder that merely EXISTS,
+# which was the whole point of asserting position rather than presence.
+case "$CTX" in
+  *'- [fact-2] Test DB: '*'tag of every fact above'*)
+    pass "tags: the closing reminder follows the entries rather than preceding them" ;;
+  *'tag of every fact above'*)
+    fail "tags: reminder present but NOT after the last entry" "ctx='$CTX'" ;;
+  *)
+    fail "tags: closing reminder missing entirely" "ctx='$CTX'" ;;
+esac
+
 # stop_case <session> <receipt-json> <transcript-lines…> — runs supply-stop.sh
 # and leaves the posted log in $POSTED.
 stop_case() {

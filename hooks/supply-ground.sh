@@ -504,9 +504,59 @@ else
   # N is the 1-based position in `$fresh`, and the receipt below derives its
   # `label` from the SAME ordering, so a tag can never name a different fact on
   # the two sides.
+  # ── MOL-8066: why this wording, and the baseline it has to beat ────────────
+  #
+  # Measured over 805 credited turns (`~/.mollow/supply-stop-reasons.log`,
+  # 2026-10-26 to 2026-11-12): `tag` carried 25.0%, `run` 72.5%, `short` 2.5%.
+  # Daily band 11.5-46.8% across 17 days with NO trend, so the original 2-of-12
+  # reading was inside the noise and nothing was improving on its own.
+  #
+  # That 25% is model behaviour, not a counting artifact: `supply-stop.sh`
+  # checks the tag branch BEFORE the verbatim run, so a turn credited `run` is
+  # one where the model did not write the tag. Three hypothesised causes, one
+  # change each, each pinned by a case in `test-supply-hooks.sh`:
+  #
+  #   (a) THE BAR. "Where your answer relies on one" set reliance as the
+  #       threshold. A fact that merely confirmed something does not feel like
+  #       reliance, so it went untagged and the verbatim fallback credited it.
+  #       Now stated as USE, with the marginal cases named.
+  #   (b) THE ASYMMETRY. The prohibition ("write a tag nowhere else") reads
+  #       sharper than the obligation, so an unsure model omits the tag — the
+  #       safe direction under the stricter-sounding rule. Keeping the
+  #       prohibition is non-negotiable (it is MOL-5936's "NAME what you
+  #       skipped" failure from the other side, where naming a skipped item
+  #       made it creditable), so the fix is to say the two do not conflict
+  #       rather than to soften the ban.
+  #   (c) POSITION. The instruction precedes the entries, and more injected
+  #       context follows the whole block, so by answer time the ask is far
+  #       away. The closing line sits nearest the answer. Its test asserts the
+  #       ORDERING, not the string — moving it back above the entries would
+  #       keep the words and lose the property.
+  #
+  # Per this file's header the wording IS the matcher's input. These changes
+  # add no new token the matcher reads: `supply-stop.sh` looks for `[fact-N]`
+  # in the ANSWER and for 8-word runs of FACT CONTENT, and nothing here is
+  # either. The entry-line format is deliberately untouched for that reason.
+  #
+  # To re-measure: compare the tag share against the 11.5-46.8% BAND, not
+  # against the single 25.0%.
+  #
+  # Cut the log at the EDIT, not at the merge. An earlier draft of this comment
+  # said a running session keeps the hook copy it started with and so straddles
+  # the change until it restarts. That is false, observed within minutes of
+  # writing it: session 03165ab6 received the new wording verbatim at
+  # 2026-11-12T18:29Z without restarting, hours into its life. The hook is
+  # re-read PER INVOCATION, so the change takes effect the moment the file
+  # changes on disk in a live worktree — which is before any merge.
+  #
+  # Cutting at the merge therefore counts post-change turns as baseline and
+  # biases toward UNDER-stating the effect. The daily band is what makes this
+  # survivable: a contaminated day shows up as a day rather than as a shifted
+  # point estimate.
   ctx="$(printf '%s' "$fresh" | jq -r '
-    "Facts from your memory that may bear on this request (surfaced by Mollow supply mode — use them if they apply, otherwise ignore). Each has a tag like [fact-1]. Where your answer relies on one, cite its tag inline at that point, e.g. \"… [fact-2]\". Cite only facts you actually used, and write a tag nowhere else — not even to say you did not use it.\n"
+    "Facts from your memory that may bear on this request (surfaced by Mollow supply mode — use them if they apply, otherwise ignore). Each has a tag like [fact-1]. If a fact informed your answer, cite its tag inline at that point, e.g. \"… [fact-2]\" — the bar is USE, not reliance: a fact that confirmed something, corrected you, or ruled an option out was used, and a small use still counts. Cite only facts you actually used, and write a tag nowhere else — not even to say you did not use it; declining a fact is silent, so the two rules never conflict.\n"
     + ([ to_entries[] | "- [fact-" + ((.key + 1) | tostring) + "] " + (.value.title // "fact") + ": " + (.value.content // "") ] | join("\n"))
+    + "\nBefore you answer: the tag of every fact above that informed you belongs inline in your answer."
     ' 2>/dev/null || true)"
 fi
 
