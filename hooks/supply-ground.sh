@@ -231,7 +231,9 @@ if [ -n "$peers_json" ] && [ "$peers_json" != "null" ]; then
 
   # A reason means the read did not run, which is NOT the same as "no peers" and
   # is said once rather than rendered as an empty roster. `unavailable` is the
-  # bounded read giving up; the rest name a caller-side fix.
+  # bounded read giving up; `no_time_left` is grounding having spent the
+  # response budget before the roster could start (MOL-8965) — neither is the
+  # caller's to fix. The rest name a caller-side fix.
   if [ -n "$peers_reason" ]; then
     mm_supply_note "peers_not_served:${peers_reason}" "$session_id" "${grounding_id:--}"
   else
