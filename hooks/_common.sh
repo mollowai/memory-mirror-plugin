@@ -357,6 +357,24 @@ mm_supply_pointer_enabled() {
   esac
 }
 
+# Ensure $1 is a directory this user owns, that is not a symlink, at mode 700 —
+# creating it under umask 077 when absent. Returns non-zero (and the caller must
+# skip its write) when any of that cannot be shown. Under a shared /tmp another
+# local user can pre-create a path a hook writes beneath, then swap or symlink
+# what lies under it; an owner check on every level the hook creates is what
+# stops a receipt write from landing in a directory someone else controls
+# (Greptile, PR #8370).
+mm_private_dir() {
+  local d="${1:-}"
+  [ -n "$d" ] || return 1
+  (
+    umask 077
+    mkdir -p "$d"
+  ) 2>/dev/null || return 1
+  [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] || return 1
+  chmod 700 "$d" 2>/dev/null || return 1
+}
+
 # True when $1 is safe to use as a single filesystem path component: non-empty,
 # only [A-Za-z0-9._-], and neither `.`/`..` nor containing a `..` sequence. The
 # supply hooks build receipt paths from `session_id` and `grounding_id`; a bare

@@ -59,6 +59,16 @@
             "timeout": 6
           }
         ]
+      },
+      {
+        "matcher": "mcp__mollow__get_session_context",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/grounding-receipt.sh",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "Stop": [
@@ -78,6 +88,11 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/record-sweep-decisions.sh",
             "timeout": 6
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/grounding-engagement.sh",
+            "timeout": 5
           }
         ]
       }
