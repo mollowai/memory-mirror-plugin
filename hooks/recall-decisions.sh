@@ -46,8 +46,45 @@ body="$(jq -cn --arg q "$prompt" --arg p "$project" '{question: $q, project: $p,
 [ -z "$body" ] && exit 0
 
 # Hard 2s cap; empty output on timeout/failure keeps the turn snappy.
-resp="$(mm_post_read "/api/memory/decisions/recall" "$body" 2)"
-[ -z "$resp" ] && exit 0
+#
+# MOL-8256: read the STATUS, not just the body. This hook used to call
+# `mm_post_read`, which returns the body alone — so a 403 from a wrong-scoped
+# key, a 500, and a 2s timeout were ONE indistinguishable empty string, and all
+# three exited 0 with no output. From inside the session that is identical to
+# "recall ran and matched nothing", which is the whole defect: a turn that lost
+# its memory cannot say so, and will re-derive a decision already settled.
+raw="$(mm_post_read_status "/api/memory/decisions/recall" "$body" 2)"
+status="$(mm_seam_split_status "$raw")"
+resp="$(mm_seam_split_body "$raw")"
+
+# A DEFINITE error is said once, in context. Same split supply-ground.sh has
+# used since MOL-5978, and the same channel: additionalContext is the only one
+# this hook has that reaches a person, and it exits immediately after.
+#
+# Deliberately ONE line naming the code, not grounding's per-status advice tree.
+# That tree exists because its statuses need OPPOSITE operator actions (a
+# workspace id versus a key versus the edge). Recall has no such split to make,
+# and inventing per-status prose here would be advice with nothing behind it.
+if mm_definite_http_failure "$status"; then
+  mm_emit_context "UserPromptSubmit" \
+    "Mollow memory: the decision-recall request was refused (HTTP ${status}), so this turn carries no recalled decisions. That is a failure to reach memory, NOT a memory with nothing in it — do not read the absence as 'nothing was decided before'."
+  exit 0
+fi
+
+# A TRANSIENT miss (000, or a 200 whose body never arrived) stays OUT of
+# context, on the operator's call of 2026-11-17: a line on every slow turn is
+# its own defect, which is why `mm_grounding_status_hint` already keeps `000`
+# quiet. It is recorded instead, so the close can report that N prompts this
+# session went ungrounded — visible where it is acted on rather than in front of
+# every prompt.
+#
+# Recorded ONLY here, never on the 200-with-no-decisions path below. Those two
+# produce the same absent injection, and conflating them would make the record
+# say "unreachable" about a working rail that had nothing to offer.
+if [ -z "$resp" ]; then
+  mm_supply_note "recall_unreachable" "${sid:--}"
+  exit 0
+fi
 
 # Seen-state (MOL-3755). A finding stays the top-ranked result for as long as the
 # conversation is about it, so without this the same warning is injected into

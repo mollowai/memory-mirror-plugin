@@ -418,11 +418,28 @@ mm_seam_post_read() {
   # `-w` appends the code on its own final line, so the body is everything
   # before it. No temp file, so there is nothing to clean up on a path that must
   # never abort.
-  local raw
-  raw="$(curl "${args[@]}" -w '\n%{http_code}' -d "$body" 2>/dev/null || true)"
+  local raw rc
+  raw="$(curl "${args[@]}" -w '\n%{http_code}' -d "$body" 2>/dev/null)"
+  rc=$?
 
   # Nothing at all: curl could not run. Not an HTTP outcome.
   if [ -z "$raw" ]; then
+    printf '000\n'
+    return 0
+  fi
+
+  # A TRUNCATED success, the same hole closed in `mm_post_read_status`
+  # (MOL-8256, Greptile on #8372). A 200 whose body was cut off part-way by
+  # `--max-time` exits nonzero with a NON-EMPTY body and a real code. Returned
+  # as-is, the caller grounds on half a document: `supply-ground.sh` reads
+  # `.grounding_id` off it, finds nothing, and exits silently — so a truncated
+  # answer becomes "the register had nothing", which is the silence this issue
+  # exists to remove.
+  #
+  # Reported as `000` because the caller's question is "did I get a usable
+  # answer", and half a document is not one. That routes it to the transient
+  # path, which is what a cut-off transfer is.
+  if [ "$rc" -ne 0 ]; then
     printf '000\n'
     return 0
   fi
@@ -746,6 +763,89 @@ mm_post_read() {
     -H "Content-Type: application/json" \
     -d "$2" \
     2>/dev/null || true
+}
+
+# POST JSON body ($2) to path ($1) with timeout ($3, default 2s) and print
+# `<http_code>\n<body>` — the bearer-auth twin of `mm_seam_post_read` (MOL-8256).
+#
+# ## Why a twin rather than one parameterised function
+#
+# The ONLY difference is the auth header: this base takes `Authorization:
+# Bearer`, the grounding seam takes `x-mollow-api-key`, and sending the wrong one
+# is a 404 that reads like a missing route. Folding the two into a shared core
+# would be the better shape, but that is a refactor of a function
+# `supply-ground.sh` depends on, inside a behaviour change — the split
+# `docs/CODING_STANDARDS.md` asks for. Filed instead of smuggled in.
+#
+# Both halves of the duplication are pinned by
+# `test-post-read-status-contract.sh`, which asserts THIS function and
+# `mm_seam_post_read` return the same shape for the same inputs, so the two
+# cannot drift apart silently.
+#
+# ## The contract, which is easy to get backwards
+#
+# `curl -w '\n%{http_code}'` appends the code LAST, but this returns it FIRST,
+# so `mm_seam_split_status` (everything before the first newline) reads the code
+# and not the body's opening line. A curl that could not run at all returns
+# `000\n` — not an HTTP outcome, and the callers treat it as transient.
+mm_post_read_status() {
+  local raw rc
+  raw="$(curl -sS --max-time "${3:-2}" \
+    -X POST "$(mm_api_base)$1" \
+    -H "Authorization: Bearer ${MOLLOW_MEMORY_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -w '\n%{http_code}' \
+    -d "$2" \
+    2>/dev/null)"
+  rc=$?
+
+  if [ -z "$raw" ]; then
+    printf '000\n'
+    return 0
+  fi
+
+  # A TRUNCATED success is the case that hides a loss, so curl's exit code is
+  # kept rather than discarded (Greptile on #8372). If the server answers 200
+  # and sends part of its JSON before `--max-time` expires, curl exits nonzero
+  # with a NON-EMPTY body carrying a real code. Returning that as-is makes the
+  # caller see a successful 200, skip its transient branch, and then fail every
+  # later `jq` read against half a document — silently, which is the whole
+  # defect MOL-8256 exists to remove, reappearing one layer in.
+  #
+  # Reported as `000`: the caller's question is "did I get a usable answer", and
+  # a half-document is not one. That routes it to the same transient path as a
+  # timeout, which is what it is.
+  if [ "$rc" -ne 0 ]; then
+    printf '000\n'
+    return 0
+  fi
+
+  local code="${raw##*$'\n'}" payload=""
+  # No newline means an empty body — `${raw%$'\n'*}` would hand back the code as
+  # the body.
+  case "$raw" in
+    *$'\n'*) payload="${raw%$'\n'*}" ;;
+  esac
+  printf '%s\n%s' "$code" "$payload"
+}
+
+# Is an HTTP status from `mm_post_read_status` a DEFINITE answer from the server,
+# as opposed to a transient miss? (MOL-8256)
+#
+# `000` is curl never completing — a timeout, a refused connection, DNS. It is
+# transient by nature and must stay out of the model's context: the hook is
+# time-boxed, and a line in front of the operator on every slow turn is its own
+# defect, which is the reason `mm_grounding_status_hint` already keeps `000`
+# silent. An empty status is the same case arriving from a caller that could not
+# read one.
+#
+# A 2xx is definite but not a failure, so it is not "definite" in the sense this
+# predicate is asked: callers use it to decide whether to SAY something.
+mm_definite_http_failure() {
+  case "${1:-}" in
+    "" | 000 | 2??) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 # Emit additionalContext for SessionStart / UserPromptSubmit. $1 = event name,

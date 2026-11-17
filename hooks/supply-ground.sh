@@ -143,7 +143,22 @@ if [ -n "$hint" ]; then
   exit 0
 fi
 
-[ -z "$resp" ] && exit 0
+# MOL-8256: the transient miss stays out of context, exactly as the comment
+# above argues it must — but it is no longer unrecorded. `000` and a body that
+# never arrived are the case the operator actually noticed, and it was
+# indistinguishable from a register with nothing to say. Noting it lets the
+# close report that N prompts this session went ungrounded, which is where it is
+# acted on.
+#
+# This is the TRANSIENT path only. A definite HTTP error already exited above
+# with its own line, and a grounding that succeeded with no new facts
+# notes `no_facts` / `all_seen` further down. Three different silences, three
+# different records — collapsing them would make the count say "unreachable"
+# about a rail that was working.
+if [ -z "$resp" ]; then
+  mm_supply_note "ground_unreachable" "${session_id:--}"
+  exit 0
+fi
 
 grounding_id="$(printf '%s' "$resp" | jq -r '.grounding_id // empty' 2>/dev/null || true)"
 [ -z "$grounding_id" ] && exit 0

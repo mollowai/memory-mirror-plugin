@@ -66,6 +66,14 @@ run() {
 # from the real `mm_post_read` budget expiring.
 [ -n "${MM_FAIL_RECALL:-}" ] && exit 7
 cat "$MM_FAKE_RESPONSE"
+# `-w '\n%{http_code}'` appends the code on its own final line. The hook reads
+# the status now (MOL-8256), so the stub has to behave like the real thing or
+# every status assertion would be asserting the stub.
+for a in "$@"; do
+  case "$a" in
+    *http_code*) printf '\n%s' "${MM_FAKE_STATUS:-200}" ;;
+  esac
+done
 EOF
   chmod +x "$TMP/bin/curl"
 
@@ -76,6 +84,7 @@ EOF
         PATH="$TMP/bin:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin" \
         HOME="$TMP" \
         MM_FAKE_RESPONSE="$TMP/response.json" \
+        MM_FAKE_STATUS="${MM_FAKE_STATUS:-200}" \
         MOLLOW_MEMORY_API_KEY="mol_test" \
         MOLLOW_MEMORY_URL="https://example.invalid/mcp/v2" \
         MOLLOW_MEMORY_CREDS_FROM_FILES=0 \
@@ -176,6 +185,75 @@ if [ -f "$STASH" ]; then
   fail "a turn whose recall never answered must not leave the previous proposal" "$(cat "$STASH")"
 else
   pass "unreachable recall ⇒ stale stash cleared (the write is never reached)"
+fi
+
+# ── MOL-8256: a failure that produced no injection must be distinguishable ──
+#
+# The hook used to exit 0 on every miss, so "recall ran and matched nothing",
+# "the key is wrong", and "the endpoint never answered" were one indistinguish-
+# able silence. Its sibling supply-ground.sh has reported definite HTTP errors
+# since MOL-5978; this hook could not, because `mm_post_read` returns the body
+# only and never the status.
+#
+# The split the operator chose (2026-11-17): a DEFINITE error is said in
+# context, because it is actionable and does not recur every turn. A TRANSIENT
+# miss stays out of context — a line on every slow turn is its own defect,
+# which `_common.sh` already records — and is recorded for the close instead.
+
+reasons_log() { printf '%s' "$TMP/.mollow/supply-stop-reasons.log"; }
+reset_reasons() { rm -f "$(reasons_log)" 2>/dev/null || true; }
+
+echo
+echo "── a definite HTTP error is said, a transient one is not ──"
+
+reset_reasons
+MM_FAKE_STATUS=403
+run "$NO_VIEW"
+unset MM_FAKE_STATUS
+# A here-string, not a pipe: `grep -q` exits on its first match and would
+# truncate the producer, which the early-exit-pipes ratchet rejects. The
+# detector's own fixtures accept this form.
+if grep -q '403' <<< "$CTX"; then
+  pass "a 403 names its status in context"
+else
+  fail "a definite HTTP error must be said once, in context" "ctx='$CTX'"
+fi
+
+reset_reasons
+MM_FAIL_RECALL=1
+run "$NO_VIEW"
+unset MM_FAIL_RECALL
+if [ -z "$CTX" ]; then
+  pass "a transient miss stays OUT of context"
+else
+  fail "a transient miss must not put a line in front of the operator" "ctx='$CTX'"
+fi
+
+echo
+echo "── a transient miss is recorded for the close; a real empty is not ──"
+
+reset_reasons
+MM_FAIL_RECALL=1
+run "$NO_VIEW"
+unset MM_FAIL_RECALL
+if grep -q 'recall_unreachable' "$(reasons_log)" 2>/dev/null; then
+  pass "unreachable recall ⇒ recorded as recall_unreachable"
+else
+  fail "a transient miss must leave a record the close can report" \
+    "log='$(cat "$(reasons_log)" 2>/dev/null)'"
+fi
+
+# THE LOAD-BEARING CASE. A 200 that legitimately matched nothing produces the
+# same absent injection as the unreachable case above. Without this assertion
+# the test passes whether or not the two are actually distinguished — the
+# distinction IS the issue.
+reset_reasons
+run "$NO_VIEW"
+if grep -q 'recall_unreachable' "$(reasons_log)" 2>/dev/null; then
+  fail "a 200 with no decisions must NOT be recorded as unreachable" \
+    "log='$(cat "$(reasons_log)" 2>/dev/null)'"
+else
+  pass "a real empty recall ⇒ not recorded as unreachable"
 fi
 
 echo
