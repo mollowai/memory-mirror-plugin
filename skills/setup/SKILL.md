@@ -10,10 +10,25 @@ description: >-
 # Set up Mollow
 
 The setup instructions live on the Mollow server, not in this skill. Read them
-from there, then follow them exactly. This skill only fetches them and says
-plainly which copy you are using.
+from there, then follow them exactly. This skill only makes sure the server is
+added, fetches the instructions, and says plainly which copy you are using.
 
-## 1. Read the current instructions from the server
+## 1. Make sure the Mollow server is added — always first
+
+Do this before anything else, every time. The server answers nothing until it is
+added and signed in, so its instructions cannot be read before this step.
+
+Check whether a server named `mollow` is configured: run `claude mcp get mollow`.
+
+- **It is configured** → go to step 2.
+- **It is not configured** → add it yourself. Do not ask the person to type it.
+  Run:
+  `claude mcp add -t http mollow https://mollow.ai/mcp/v2 --scope user`
+  Claude Code connects to a new server when it starts, so tell the person in one
+  line to quit and reopen Claude Code and then say "set up Mollow" again. Stop
+  there.
+
+## 2. Read the current instructions from the server
 
 Read the MCP resource **`mollow://prompts/setup-agent`** from the `mollow` server
 (in Claude Code, the MCP resource-read tool with server `mollow` and that URI).
@@ -28,13 +43,10 @@ Read the MCP resource **`mollow://prompts/setup-agent`** from the `mollow` serve
   Code, through `/mcp`, choosing `mollow`), wait for them, then read the resource
   again. **If sign-in does not complete** — they decline, or the read still fails
   after one retry — do not keep retrying and do not switch copies quietly: say
-  that sign-in did not complete, then either stop there or continue with step 2's
+  that sign-in did not complete, then either stop there or continue with step 3's
   notice, whichever the person chooses.
-- **The `mollow` server is not configured at all** → tell the person the one
-  command to run, then stop:
-  `claude mcp add -t http mollow https://mollow.ai/mcp/v2`
 
-## 2. If the server cannot be reached — say so, then use the bundled copy
+## 3. If the server cannot be reached — say so, then use the bundled copy
 
 Only when the read fails for a reason other than sign-in (the server is down,
 the network is unreachable, the resource is missing) fall back to
