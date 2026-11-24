@@ -140,6 +140,9 @@ resp="$(mm_seam_split_body "$raw")"
 hint="$(mm_grounding_status_hint "$status" "$resp")"
 if [ -n "$hint" ]; then
   mm_emit_context "UserPromptSubmit" "$hint"
+  # Recorded under its own reason (MOL-9571) so the ledger accounts for every
+  # call; never as `ground_unreachable`, which counts only the silent misses.
+  mm_supply_note "ground_refused:http${status}" "${session_id:--}" "-" "$(mm_seam_split_detail "$raw")"
   exit 0
 fi
 
@@ -155,10 +158,17 @@ fi
 # notes `no_facts` / `all_seen` further down. Three different silences, three
 # different records — collapsing them would make the count say "unreachable"
 # about a rail that was working.
+#
+# MOL-9571: `ground_unreachable:<class>` with curl's detail, and a streak of
+# them said once — see `mm_rail_outcome`.
 if [ -z "$resp" ]; then
-  mm_supply_note "ground_unreachable" "${session_id:--}"
+  mm_rail_outcome ground "${session_id:-}" UserPromptSubmit unreachable "$raw"
   exit 0
 fi
+# Not a bare success: `mm_rail_outcome` downgrades a body that is not a JSON
+# object to `ground_unreachable:unparseable`, and the jq reads below then find
+# nothing and exit silently — the same silence, now on the record.
+mm_rail_outcome ground "${session_id:-}" UserPromptSubmit ok "$raw"
 
 grounding_id="$(printf '%s' "$resp" | jq -r '.grounding_id // empty' 2>/dev/null || true)"
 [ -z "$grounding_id" ] && exit 0

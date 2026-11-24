@@ -433,42 +433,109 @@ mm_seam_post_read() {
   [ -n "${MOLLOW_SUPPLY_WORKSPACE_ID:-}" ] &&
     args+=(-H "x-mollow-workspace-id: ${MOLLOW_SUPPLY_WORKSPACE_ID}")
 
-  # `-w` appends the code on its own final line, so the body is everything
-  # before it. No temp file, so there is nothing to clean up on a path that must
-  # never abort.
-  local raw rc
-  raw="$(curl "${args[@]}" -w '\n%{http_code}' -d "$body" 2>/dev/null)"
-  rc=$?
-
-  # Nothing at all: curl could not run. Not an HTTP outcome.
-  if [ -z "$raw" ]; then
-    printf '000\n'
-    return 0
-  fi
-
-  # A TRUNCATED success, the same hole closed in `mm_post_read_status`
-  # (MOL-8256, Greptile on #8372). A 200 whose body was cut off part-way by
-  # `--max-time` exits nonzero with a NON-EMPTY body and a real code. Returned
-  # as-is, the caller grounds on half a document: `supply-ground.sh` reads
-  # `.grounding_id` off it, finds nothing, and exits silently — so a truncated
-  # answer becomes "the register had nothing", which is the silence this issue
-  # exists to remove.
+  # `-w` appends the code (and the elapsed time) on its own final line, so the
+  # body is everything before it. No temp file, so there is nothing to clean up
+  # on a path that must never abort.
   #
-  # Reported as `000` because the caller's question is "did I get a usable
-  # answer", and half a document is not one. That routes it to the transient
-  # path, which is what a cut-off transfer is.
-  if [ "$rc" -ne 0 ]; then
-    printf '000\n'
+  # A TRUNCATED success — a 200 whose body `--max-time` cut off part-way — exits
+  # nonzero with a NON-EMPTY body and a real code (MOL-8256, Greptile on #8372).
+  # `_mm_read_status_finish` reports it as `000`, because the caller's question
+  # is "did I get a usable answer" and half a document is not one; returned
+  # as-is, `supply-ground.sh` would read `.grounding_id` off it, find nothing,
+  # and exit silently.
+  local raw rc
+  raw="$(curl "${args[@]}" -w '\n%{http_code}\t%{time_total}' -d "$body" 2>/dev/null)"
+  rc=$?
+  _mm_read_status_finish "$raw" "$rc"
+}
+
+# The shared tail of `mm_seam_post_read` and `mm_post_read_status`: turn curl's
+# raw output and exit code into `<status>[\t<detail>]\n<body>` (MOL-9571).
+#
+# ## Why the detail exists
+#
+# `000` used to be the whole story for every miss, so a timeout, a DNS failure,
+# a refused connection and a body cut off mid-transfer all reached
+# `mm_supply_note` as one string — `recall_unreachable` — and 1,213 of them on
+# mac-primary could not be told apart. Tuning the 2s cap on that is a guess. The
+# detail carries what curl knows: its exit code, the HTTP code it saw (a cut-off
+# 200 keeps its 200 here even though the status says `000`), and the elapsed
+# seconds. `mm_rail_failure_class` reads it.
+#
+# It rides the STATUS LINE after a tab rather than a third line, because every
+# caller already splits on the first newline and a third line would land in the
+# body. `mm_seam_split_status` drops everything from the tab, so a caller that
+# never asks for the detail sees exactly the status it always did.
+#
+# `-w` output is printed by curl even when the transfer fails — measured on curl
+# 8.7.1: a connect timeout, an NXDOMAIN and a refused port each still print
+# `\n000\t<secs>` — so the detail is present on the failures it exists for. An
+# empty `raw` means curl never ran at all.
+_mm_read_status_finish() {
+  local raw="$1" rc="${2:-0}"
+  if [ -z "$raw" ]; then
+    printf '000\trc=%s http=000 t=?\n' "$rc"
     return 0
   fi
 
-  local code="${raw##*$'\n'}" payload=""
-  # No newline means an empty body — `${raw%$'\n'*}` would hand back the code as
-  # the body.
+  local trailer="${raw##*$'\n'}" payload=""
+  # No newline means an empty body — `${raw%$'\n'*}` would hand back the
+  # trailer as the body.
   case "$raw" in
     *$'\n'*) payload="${raw%$'\n'*}" ;;
   esac
-  printf '%s\n%s' "$code" "$payload"
+  local code="${trailer%%$'\t'*}" secs="?"
+  case "$trailer" in
+    *$'\t'*) secs="${trailer#*$'\t'}" ;;
+  esac
+  case "$code" in '' | *[!0-9]*) code=000 ;; esac
+  case "$secs" in '' | *[!0-9.]*) secs="?" ;; esac
+
+  local detail="rc=${rc} http=${code} t=${secs}"
+  if [ "$rc" -ne 0 ]; then
+    printf '000\t%s\n' "$detail"
+    return 0
+  fi
+  printf '%s\t%s\n%s' "$code" "$detail" "$payload"
+}
+
+# The diagnostic half of a status line, e.g. `rc=28 http=000 t=2.004`, or empty
+# when the result carries none (MOL-9571).
+mm_seam_split_detail() {
+  local line="${1%%$'\n'*}"
+  case "$line" in
+    *$'\t'*) printf '%s' "${line#*$'\t'}" ;;
+    *) printf '' ;;
+  esac
+}
+
+# Name the KIND of miss from a detail string (MOL-9571). One word, so a reason
+# like `recall_unreachable:timeout` can be counted with `cut`/`sort | uniq -c`.
+#
+# The split that decides what step 2 of MOL-9571 does:
+#   timeout          — no HTTP response inside the cap. The cap is a suspect.
+#   timeout_mid_body — the server ANSWERED (a real code) and the cap cut the
+#                      transfer. Also the cap, but the server was the slow part.
+#   dns / refused / tls / conn_reset / empty_reply — network or edge faults a
+#                      longer cap would only make slower.
+#   empty_body       — curl succeeded and a 2xx carried nothing.
+#   no_curl          — curl could not be executed.
+mm_rail_failure_class() {
+  local d="${1:-}" rc="" http=""
+  rc="$(printf '%s' "$d" | sed -n 's/.*rc=\([0-9]*\).*/\1/p')"
+  http="$(printf '%s' "$d" | sed -n 's/.*http=\([0-9]*\).*/\1/p')"
+  case "$rc" in
+    '') printf 'unknown' ;;
+    0) printf 'empty_body' ;;
+    28) if [ -n "$http" ] && [ "$http" != 000 ]; then printf 'timeout_mid_body'; else printf 'timeout'; fi ;;
+    6 | 5) printf 'dns' ;;
+    7) printf 'refused' ;;
+    35 | 51 | 53 | 54 | 58 | 59 | 60 | 64 | 66 | 77 | 80 | 83 | 90 | 91) printf 'tls' ;;
+    52) printf 'empty_reply' ;;
+    55 | 56) printf 'conn_reset' ;;
+    126 | 127) printf 'no_curl' ;;
+    *) printf 'curl_rc%s' "$rc" ;;
+  esac
 }
 
 # Record WHY this turn's outcome post-back did or did not happen (MOL-7981).
@@ -522,8 +589,33 @@ mm_seam_post_read() {
 #
 # Always returns 0 and never writes to stderr, like every other helper here. A
 # diagnostic that can fail a turn is worse than no diagnostic.
-mm_supply_note() {
-  local reason="${1:-unknown}" session="${2:--}" grounding="${3:--}"
+#
+# ## The optional fifth column (MOL-9571)
+#
+# `$4` is a free-form detail — for the rail calls, `rc=28 http=000 t=2.004`
+# from `mm_seam_split_detail` — written as a FIFTH tab-separated column only
+# when given. Appended rather than inserted, so every existing reader keyed on
+# columns 1-4 (`session-residue.sh` greps the reason; `awk -F'\t' '{print $4}'`
+# still returns it) reads an old and a new record identically.
+mm_supply_note() { _mm_ledger_append supply-stop-reasons "$@"; }
+
+# Per-call latency of a rail call that WORKED (MOL-9571): `<rail>_ok` rows.
+#
+# A SEPARATE file from `supply-stop-reasons.log`, on purpose. Those rows are one
+# per prompt per rail, against one per Stop for everything else, so in the
+# shared ledger they would have filled the 1 MiB rotation roughly twice as fast
+# — halving the Stop-outcome history `docs/evaluation/supply-postback-loss.md`
+# reads, and the window `session-residue.sh` counts misses over — and diluted
+# `cut -f4 | uniq -c` shares that were written for Stop outcomes. The misses and
+# refusals stay in the ledger, beside the outcomes they explain.
+mm_rail_latency_note() { _mm_ledger_append rail-latency "$@"; }
+
+# The writer behind both: `$1` names the file under ~/.mollow (and its lock).
+_mm_ledger_append() {
+  local name="$1"
+  shift
+  case "$name" in supply-stop-reasons | rail-latency) ;; *) return 0 ;; esac
+  local reason="${1:-unknown}" session="${2:--}" grounding="${3:--}" detail="${4:-}"
   [ -n "${HOME:-}" ] || return 0
 
   # Tabs and newlines are the record separators, so they cannot survive inside a
@@ -531,10 +623,11 @@ mm_supply_note() {
   reason="$(printf '%s' "$reason" | tr -d '\n\t')"
   session="$(printf '%s' "$session" | tr -d '\n\t')"
   grounding="$(printf '%s' "$grounding" | tr -d '\n\t')"
+  detail="$(printf '%s' "$detail" | tr -d '\n\t')"
 
   local dir="${HOME}/.mollow"
   mkdir -p "$dir" 2>/dev/null || return 0
-  local log="$dir/supply-stop-reasons.log"
+  local log="$dir/${name}.log"
 
   # ── rotate and append under a lock, or two Stops erase the archive ─────────
   # Every session on this machine shares one `$HOME`, so Stop hooks overlap.
@@ -548,7 +641,7 @@ mm_supply_note() {
   # appending without rotating — one oversized log — rather than blocking or
   # skipping the record. A lock older than 60s is stale (its holder died
   # mid-note) and is cleared, since nothing here can outlive that.
-  local lock="$dir/supply-stop-reasons.lock" held=""
+  local lock="$dir/${name}.lock" held=""
   local i=0
   while [ "$i" -lt 25 ]; do
     if mkdir "$lock" 2>/dev/null; then
@@ -589,9 +682,15 @@ mm_supply_note() {
     fi
   fi
 
-  printf '%s\t%s\t%s\t%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${session:--}" "${grounding:--}" "${reason:--}" \
-    2>/dev/null >>"$log" || true
+  if [ -n "$detail" ]; then
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${session:--}" "${grounding:--}" "${reason:--}" "$detail" \
+      2>/dev/null >>"$log" || true
+  else
+    printf '%s\t%s\t%s\t%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${session:--}" "${grounding:--}" "${reason:--}" \
+      2>/dev/null >>"$log" || true
+  fi
 
   # `|| true` is load-bearing in an errexit caller, which this library has to
   # survive: it is shared, and nothing stops a future `set -euo pipefail` script
@@ -606,8 +705,128 @@ mm_supply_note() {
   return 0
 }
 
-# The status line from an `mm_seam_post_read` result.
-mm_seam_split_status() { printf '%s' "${1%%$'\n'*}"; }
+# Count CONSECUTIVE unreachable calls for one session and one rail, and print
+# the new count (MOL-9571, step 3). `$1` = rail (`recall` / `ground`), `$2` =
+# session id, `$3` = `fail` or `ok`.
+#
+# ## Why a counter file and not the reasons log
+#
+# Answering "consecutive" from the log means scanning a shared, up-to-1MiB file
+# filtered by session on every prompt, inside a 2s-budgeted hook, and any record
+# lost to a lock race would silently join two streaks. So the state is its own
+# file per session and rail, holding one integer, removed on the first `ok` — a
+# recovered rail leaves nothing behind, and a later outage counts from one
+# again.
+#
+# Exact paths only, never a glob: this directory's history is MOL-6199/6255,
+# where a glob that matched nothing turned an `rm` into a deletion of every
+# tracked root file in every worktree. A session id outside [A-Za-z0-9_-] is
+# not counted at all, so it can never shape a path. Prints `0` and returns 0 on
+# any doubt, like every helper here.
+mm_rail_streak() {
+  local rail="${1:-}" sid="${2:-}" outcome="${3:-}"
+  case "$rail" in recall | ground) ;; *) printf '0'; return 0 ;; esac
+  case "$sid" in '' | *[!A-Za-z0-9_-]*) printf '0'; return 0 ;; esac
+  [ -n "${HOME:-}" ] || { printf '0'; return 0; }
+  local dir="${HOME}/.mollow/rail-streak"
+  local file="${dir}/${sid}.${rail}"
+  if [ "$outcome" != fail ]; then
+    [ -f "$file" ] && rm -f "$file" 2>/dev/null
+    printf '0'
+    return 0
+  fi
+  mkdir -p "$dir" 2>/dev/null || { printf '0'; return 0; }
+  local n=0
+  # A count last touched over an hour ago belongs to an earlier outage — a
+  # session that ended mid-outage, or one resumed days later — and starts over.
+  # The same pass sweeps other sessions' abandoned counters past a day. `find`
+  # on one fixed directory with a literal name pattern: no shell glob, so no
+  # empty-match expansion can turn this into something wider (MOL-6199).
+  if [ -f "$file" ] && [ -z "$(find "$file" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then
+    n="$(head -c 16 "$file" 2>/dev/null | tr -cd '0-9')"
+  fi
+  find "$dir" -maxdepth 1 -type f \( -name '*.recall' -o -name '*.ground' \) -mmin +1440 -delete 2>/dev/null || true
+  n=$(( ${n:-0} + 1 ))
+  printf '%s\n' "$n" 2>/dev/null >"$file" || true
+  printf '%s' "$n"
+}
+
+# How many consecutive unreachable calls on one rail before the session is told
+# once, mid-turn (MOL-9571). Five, not one: a single miss stays silent on the
+# operator's 2026-11-17 ruling that a line on every slow turn is its own
+# defect. Five in a row is an outage, not a slow turn. Override with
+# MOLLOW_RAIL_STREAK_WARN; a non-number falls back to the default.
+mm_rail_streak_threshold() {
+  local n="${MOLLOW_RAIL_STREAK_WARN:-5}"
+  case "$n" in '' | *[!0-9]*) n=5 ;; esac
+  # Base 10 explicitly: `05` is a valid override, and `08` would otherwise be
+  # read as an invalid octal literal.
+  n=$((10#$n))
+  [ "$n" -gt 0 ] || n=5
+  printf '%s' "$n"
+}
+
+# Record one rail call's outcome, and say so ONCE when a streak becomes an
+# outage (MOL-9571). Shared by `recall-decisions.sh` and `supply-ground.sh` so
+# the two rails cannot word or count it differently.
+#
+#   mm_rail_outcome <rail> <session> <event> unreachable|ok <raw-result> [class]
+#
+# `ok` is downgraded to `unreachable:unparseable` here when the body is not a
+# JSON object: a 200 carrying a Cloudflare HTML page or half a document is read
+# by every later `jq` as nothing, so the turn is exactly as ungrounded as on a
+# timeout — and recording it as a success would clear the streak mid-outage
+# (Greptile on #8718). One check here, so neither hook can forget it.
+#
+# `unreachable` writes `<rail>_unreachable:<class>` with the curl detail as the
+# fifth column, bumps the streak, and — at exactly the threshold, never before
+# and never again until the rail recovers — prints the additionalContext JSON
+# for `<event>`. `ok` writes `<rail>_ok` with the same detail to
+# `~/.mollow/rail-latency.log` (see `mm_rail_latency_note` for why not the
+# ledger) and clears the streak.
+#
+# ## Why `ok` is recorded at all
+#
+# Before this, the recall rail wrote NOTHING when it worked, so the 22% in
+# MOL-9571 is unreachable records over all records in a ledger that never
+# counted a working recall: a numerator over another numerator. The same
+# argument `mm_supply_note`'s header makes for `posted` applies one hop earlier
+# — and the `t=` on a success is the latency distribution step 2 needs to place
+# a cap against.
+mm_rail_outcome() {
+  local rail="$1" sid="$2" event="$3" outcome="$4" raw="${5:-}" class="${6:-}"
+  local detail
+  detail="$(mm_seam_split_detail "$raw")"
+  if [ "$outcome" = ok ] &&
+    ! mm_seam_split_body "$raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    outcome=unreachable
+    class=unparseable
+  fi
+  if [ "$outcome" = ok ]; then
+    mm_rail_latency_note "${rail}_ok" "${sid:--}" "-" "$detail"
+    mm_rail_streak "$rail" "$sid" ok >/dev/null
+    return 0
+  fi
+
+  local n limit
+  [ -n "$class" ] || class="$(mm_rail_failure_class "$detail")"
+  mm_supply_note "${rail}_unreachable:${class}" "${sid:--}" "-" "$detail"
+  n="$(mm_rail_streak "$rail" "$sid" fail)"
+  limit="$(mm_rail_streak_threshold)"
+  [ "$n" -eq "$limit" ] 2>/dev/null || return 0
+
+  local what="decision recall"
+  [ "$rail" = ground ] && what="grounding"
+  mm_emit_context "$event" \
+    "Mollow memory: the last ${n} ${what} calls this session got no usable answer (latest: ${class}, ${detail}). Those turns ran without memory — read the absence as a failed call, not as a memory with nothing in it. Said once per outage; it resets when the rail answers again."
+}
+
+# The status from an `mm_seam_post_read` result: the first line, minus any
+# tab-separated detail (`mm_seam_split_detail` reads that half).
+mm_seam_split_status() {
+  local line="${1%%$'\n'*}"
+  printf '%s' "${line%%$'\t'*}"
+}
 
 # The body from an `mm_seam_post_read` result, empty when there was none.
 mm_seam_split_body() {
@@ -812,39 +1031,16 @@ mm_post_read_status() {
     -X POST "$(mm_api_base)$1" \
     -H "Authorization: Bearer ${MOLLOW_MEMORY_API_KEY}" \
     -H "Content-Type: application/json" \
-    -w '\n%{http_code}' \
+    -w '\n%{http_code}\t%{time_total}' \
     -d "$2" \
     2>/dev/null)"
   rc=$?
 
-  if [ -z "$raw" ]; then
-    printf '000\n'
-    return 0
-  fi
-
   # A TRUNCATED success is the case that hides a loss, so curl's exit code is
-  # kept rather than discarded (Greptile on #8372). If the server answers 200
-  # and sends part of its JSON before `--max-time` expires, curl exits nonzero
-  # with a NON-EMPTY body carrying a real code. Returning that as-is makes the
-  # caller see a successful 200, skip its transient branch, and then fail every
-  # later `jq` read against half a document — silently, which is the whole
-  # defect MOL-8256 exists to remove, reappearing one layer in.
-  #
-  # Reported as `000`: the caller's question is "did I get a usable answer", and
-  # a half-document is not one. That routes it to the same transient path as a
-  # timeout, which is what it is.
-  if [ "$rc" -ne 0 ]; then
-    printf '000\n'
-    return 0
-  fi
-
-  local code="${raw##*$'\n'}" payload=""
-  # No newline means an empty body — `${raw%$'\n'*}` would hand back the code as
-  # the body.
-  case "$raw" in
-    *$'\n'*) payload="${raw%$'\n'*}" ;;
-  esac
-  printf '%s\n%s' "$code" "$payload"
+  # kept rather than discarded (Greptile on #8372): a 200 cut off by
+  # `--max-time` is reported as `000`, not as a usable 200. The tail is shared
+  # with `mm_seam_post_read` so the two cannot drift (MOL-9571).
+  _mm_read_status_finish "$raw" "$rc"
 }
 
 # Is an HTTP status from `mm_post_read_status` a DEFINITE answer from the server,

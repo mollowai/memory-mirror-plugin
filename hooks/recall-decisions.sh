@@ -68,6 +68,10 @@ resp="$(mm_seam_split_body "$raw")"
 if mm_definite_http_failure "$status"; then
   mm_emit_context "UserPromptSubmit" \
     "Mollow memory: the decision-recall request was refused (HTTP ${status}), so this turn carries no recalled decisions. That is a failure to reach memory, NOT a memory with nothing in it — do not read the absence as 'nothing was decided before'."
+  # Recorded too (MOL-9571), under its own reason, so the ledger accounts for
+  # every call. Never as `recall_unreachable`: it was SAID above, and the
+  # close's unreachable count is for the silent misses only.
+  mm_supply_note "recall_refused:http${status}" "${sid:--}" "-" "$(mm_seam_split_detail "$raw")"
   exit 0
 fi
 
@@ -81,10 +85,20 @@ fi
 # Recorded ONLY here, never on the 200-with-no-decisions path below. Those two
 # produce the same absent injection, and conflating them would make the record
 # say "unreachable" about a working rail that had nothing to offer.
+#
+# MOL-9571: the record now says WHICH miss it was — `recall_unreachable:timeout`
+# against `:dns`, `:refused`, `:timeout_mid_body` — with curl's exit code, the
+# HTTP code it saw and the elapsed seconds beside it, because tuning the 2s cap
+# on 1,213 indistinguishable records was a guess. A streak of them becomes one
+# line in context (`mm_rail_outcome`), never one per miss.
 if [ -z "$resp" ]; then
-  mm_supply_note "recall_unreachable" "${sid:--}"
+  mm_rail_outcome recall "${sid:-}" UserPromptSubmit unreachable "$raw"
   exit 0
 fi
+# Not a bare success: `mm_rail_outcome` downgrades a body that is not a JSON
+# object to `recall_unreachable:unparseable`, and the jq reads below then find
+# nothing and exit silently — the same silence, now on the record.
+mm_rail_outcome recall "${sid:-}" UserPromptSubmit ok "$raw"
 
 # Seen-state (MOL-3755). A finding stays the top-ranked result for as long as the
 # conversation is about it, so without this the same warning is injected into
