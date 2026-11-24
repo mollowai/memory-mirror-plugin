@@ -24,7 +24,7 @@
 # Posts go through a fake `curl` on PATH, so what is asserted is the real
 # request rather than a reimplementation of the hook's jq.
 #
-# Run: bash plugins/memory-mirror/hooks/test-record-sweep-decisions.sh
+# Run: bash plugins/mollow-claude/hooks/test-record-sweep-decisions.sh
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOK="$DIR/record-sweep-decisions.sh"

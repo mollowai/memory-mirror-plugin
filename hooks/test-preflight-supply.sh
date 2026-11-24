@@ -33,7 +33,7 @@ set -euo pipefail
 # No network: the hook under test is itself a stub here. Driving the real
 # supply-ground.sh would test the server, not the pre-flight.
 #
-# Run: bash plugins/memory-mirror/hooks/test-preflight-supply.sh
+# Run: bash plugins/mollow-claude/hooks/test-preflight-supply.sh
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$DIR/preflight-supply.sh"

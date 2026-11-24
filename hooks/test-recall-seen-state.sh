@@ -9,7 +9,7 @@ set -euo pipefail
 # unlocked read-modify-replace loses the other writer's keys, and a lost key means
 # an already-shown contradiction is injected into context a second time.
 #
-# Run: bash plugins/memory-mirror/hooks/test-recall-seen-state.sh
+# Run: bash plugins/mollow-claude/hooks/test-recall-seen-state.sh
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

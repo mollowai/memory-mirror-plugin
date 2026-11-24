@@ -30,7 +30,7 @@
 # The response is stubbed through a fake `curl` on PATH, so what is asserted is
 # the hook's real output rather than a reimplementation of its jq.
 #
-# Run: bash plugins/memory-mirror/hooks/test-recall-decisions-render.sh
+# Run: bash plugins/mollow-claude/hooks/test-recall-decisions-render.sh
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOK="$DIR/recall-decisions.sh"

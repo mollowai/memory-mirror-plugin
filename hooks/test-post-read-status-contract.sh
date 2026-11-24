@@ -25,7 +25,7 @@
 # them to each other, so a change to one that is not made to the other fails
 # here regardless of which one is "right".
 #
-# Run: bash plugins/memory-mirror/hooks/test-post-read-status-contract.sh
+# Run: bash plugins/mollow-claude/hooks/test-post-read-status-contract.sh
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

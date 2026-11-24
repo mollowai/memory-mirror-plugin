@@ -18,7 +18,7 @@ diffs local content against the cloud, rather than trusting the hook's local
 
 ## Tool
 
-`plugins/memory-mirror/scripts/memory_sync.py` — dependency-free, curl-backed.
+`plugins/mollow-claude/scripts/memory_sync.py` — dependency-free, curl-backed.
 
 | Command | Effect |
 |---|---|
@@ -44,7 +44,7 @@ keys on `content`. (MOL-6187; before it, `push` never passed `--repo` at all.)
 1. Run the requested command from the repo root, e.g.:
 
    ```bash
-   python3 plugins/memory-mirror/scripts/memory_sync.py --all verify
+   python3 plugins/mollow-claude/scripts/memory_sync.py --all verify
    ```
 
    Default to `verify --all` when the user asks "is everything synced?".
@@ -81,7 +81,7 @@ keys on `content`. (MOL-6187; before it, `push` never passed `--repo` at all.)
 
    **Reading one back.** Every `push` writes the per-entry hashes the import returned
    under `~/.mollow/` and prints the absolute path (the `HASHES_PATH` constant in
-   `plugins/memory-mirror/scripts/memory_sync.py`):
+   `plugins/mollow-claude/scripts/memory_sync.py`):
 
    ```
      hashes: 48 written to <path printed here>

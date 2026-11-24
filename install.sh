@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — enable the memory-mirror Claude Code hooks for the current user.
+# install.sh — enable the mollow-claude Claude Code hooks for the current user.
 #
 # One command for a teammate to turn on Memory grounding: merges the NO-GATE
 # recall / grounding / capture / sync hooks into ~/.claude/settings.json,
@@ -8,7 +8,7 @@
 # (blocking citation-discipline enforcement); the default is gate-free.
 #
 # Usage:
-#   bash plugins/memory-mirror/install.sh [--with-gates]
+#   bash plugins/mollow-claude/install.sh [--with-gates]
 #
 # After it runs: restart Claude Code (hooks load at startup).
 set -euo pipefail
@@ -21,7 +21,7 @@ case "${1:-}" in
 esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-HOOKS_DIR="$ROOT/plugins/memory-mirror/hooks"
+HOOKS_DIR="$ROOT/plugins/mollow-claude/hooks"
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
@@ -113,7 +113,7 @@ with open(settings_path, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 
-print("✓ installed memory-mirror hooks" + (" (with gates)" if with_gates else " (no gates)") + ":")
+print("✓ installed mollow-claude hooks" + (" (with gates)" if with_gates else " (no gates)") + ":")
 for a in added:
     print("   + " + a)
 print("→ restart Claude Code to activate. Decision recall, decision-capture and session")

@@ -16,7 +16,7 @@ set -uo pipefail
 # No network: curl is a PATH shim that logs its argv, so "was a request
 # attempted, and with what body" is a file check.
 #
-# Run: bash plugins/memory-mirror/hooks/test-grounding-engagement.sh
+# Run: bash plugins/mollow-claude/hooks/test-grounding-engagement.sh
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

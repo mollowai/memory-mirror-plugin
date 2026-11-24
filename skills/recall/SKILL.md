@@ -19,5 +19,5 @@ Search the user's Memory Mirror for past decisions, conversations, and knowledge
 
 ## When NOT to use
 
-- For "what did I work on today/this week" questions, use `/memory-mirror:what-happened` instead
-- For saving new memories, use `/memory-mirror:remember` instead
+- For "what did I work on today/this week" questions, use `/mollow-claude:what-happened` instead
+- For saving new memories, use `/mollow-claude:remember` instead

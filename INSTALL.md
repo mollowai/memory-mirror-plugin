@@ -1,4 +1,4 @@
-# Installing Memory Mirror on a customer machine
+# Installing the Mollow Claude plugin on a customer machine
 
 This plugin ships one authored **coding doctrine** into your Claude Code dev loop.
 The doctrine runs **locally** — as advisory guardrail warnings on your tool calls —
@@ -7,14 +7,14 @@ are optional and layer on top; see the end.)
 
 ## What you receive
 
-A single archive, `memory-mirror-plugin-<version>.tgz`, produced by Mollow's
+A single archive, `mollow-claude-plugin-<version>.tgz`, produced by Mollow's
 packaging step (`scripts/package-plugin.sh`). It is a self-contained Claude Code
 plugin *marketplace*:
 
 ```
-memory-mirror-plugin/
+mollow-claude-plugin/
   .claude-plugin/marketplace.json     ← the marketplace manifest
-  memory-mirror/                       ← the plugin
+  mollow-claude/                       ← the plugin
     .claude-plugin/plugin.json
     hooks/…                            ← deterministic, offline guardrail hooks
     hooks/guardrail-predicates.json    ← the active authored doctrine (local)
@@ -47,14 +47,14 @@ MCP URL (`mollow.ai`); that path stays inert until you connect a Mollow account
 
 ```bash
 # 1. Unpack wherever you keep tools (not inside your project repo).
-tar xzf memory-mirror-plugin-<version>.tgz
-cd memory-mirror-plugin
+tar xzf mollow-claude-plugin-<version>.tgz
+cd mollow-claude-plugin
 
 # 2. Register this folder as a local marketplace.
 claude plugin marketplace add .
 
 # 3. Install the plugin from it.
-claude plugin install memory-mirror@mollow
+claude plugin install mollow-claude@mollow
 ```
 
 Restart Claude Code. From then on, when you run a tool call that trips a doctrine
@@ -64,8 +64,10 @@ and **proceeds** — the local doctrine is warn-only and never blocks your work.
 ### Verify it is live
 
 ```bash
+# from the marketplace root you unpacked above, step into the plugin:
+cd mollow-claude
 echo '{"tool_name":"Bash","tool_input":{"command":"deploy --no-verify now"},"session_id":"check","cwd":"'"$PWD"'"}' \
-  | bash memory-mirror/hooks/guardrails-gate.sh
+  | bash hooks/guardrails-gate.sh
 ```
 
 You should see a JSON object with `additionalContext` naming the `--no-verify`
@@ -117,10 +119,10 @@ work, and the local doctrine above runs with no account regardless. See
 
 ```bash
 # Stage + sanitize + validate structure, no tarball:
-bash plugins/memory-mirror/scripts/package-plugin.sh --dry-run
+bash plugins/mollow-claude/scripts/package-plugin.sh --dry-run
 
 # Build the shippable tarball:
-bash plugins/memory-mirror/scripts/package-plugin.sh --out ./dist
+bash plugins/mollow-claude/scripts/package-plugin.sh --out ./dist
 ```
 
 The packaging step strips the monorepo-specific predicate shell

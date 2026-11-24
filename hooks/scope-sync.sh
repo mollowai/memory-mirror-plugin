@@ -27,7 +27,7 @@
 #
 #   * the parent was enumerated — every child listed. Unanimity is a claim about
 #     all of them, and a directory named with `--dir` is a sample of one, where
-#     "all children agree" is trivially true and would emit a rule covering
+#     "all children agree" is vacuously true and would emit a rule covering
 #     siblings never examined;
 #   * its live children agree on one repository. Two repositories under one
 #     parent means the parent says nothing.
@@ -125,7 +125,7 @@ fi
 #
 # The enumeration requirement is what makes unanimity mean anything. A directory
 # named with --dir (or the cwd) is a sample of one: nothing else under its parent
-# was listed, so "all children agree" is trivially true and would emit a rule
+# was listed, so "all children agree" is vacuously true and would emit a rule
 # covering siblings never examined. Because a mapped row is skipped by later runs
 # (`repo IS NULL`), that wrong rule would be permanent — a corrected run could
 # not take it back.

@@ -39,7 +39,7 @@ set -euo pipefail
 #   * no path prints the key. A hook that leaks a bearer token into a transcript
 #     is worse than a hook that does nothing.
 #
-# Run: bash plugins/memory-mirror/hooks/test-file-config.sh
+# Run: bash plugins/mollow-claude/hooks/test-file-config.sh
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

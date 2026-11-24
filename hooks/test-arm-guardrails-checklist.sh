@@ -16,7 +16,7 @@
 # Both are rendering, not logic, which is why a source-level read missed them
 # and why this asserts the OUTPUT through the real hook.
 #
-# Run: bash plugins/memory-mirror/hooks/test-arm-guardrails-checklist.sh
+# Run: bash plugins/mollow-claude/hooks/test-arm-guardrails-checklist.sh
 # =============================================================================
 set -uo pipefail
 

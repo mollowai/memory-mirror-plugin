@@ -17,7 +17,7 @@ set -uo pipefail
 # No network: curl is replaced by a PATH shim that logs every invocation and
 # returns a canned body, so "was a request attempted" is a file check.
 #
-# Run: bash plugins/memory-mirror/hooks/test-supply-hooks.sh
+# Run: bash plugins/mollow-claude/hooks/test-supply-hooks.sh
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

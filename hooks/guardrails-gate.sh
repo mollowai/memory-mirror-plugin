@@ -197,7 +197,7 @@ tdd_would_block() {
     # Generated / vendored trees — at the repo root or nested. The leading-segment
     # forms (deps/*, …) catch root-level vendored dirs that */deps/* would miss and
     # that would otherwise fall through to an implementation mapping (e.g.
-    # deps/<pkg>/lib/x.ex matching */lib/*.ex).
+    # deps/<pkg>/lib/*.ex matching */lib/*.ex).
     deps/* | node_modules/* | _build/* | out/* | dist/* | \
       */deps/* | */node_modules/* | */_build/* | */out/* | */dist/*)
       return 1

@@ -6,11 +6,11 @@
 # block a session):
 #   * Keyed + python3  -> parse and POST to /api/memory/import silently.
 #   * Otherwise        -> inject a prompt nudging Claude to run the
-#                         /memory-mirror:import-local-memories skill over its
+#                         /mollow-claude:import-local-memories skill over its
 #                         OAuth MCP connection (works for every end user).
 #
 # Incremental: a content fingerprint per project is stored in
-# ~/.mollow/memory-sync-state.json so an unchanged memory dir does nothing.
+# a generated ~/.mollow/memory-sync-state.json (not committed) so an unchanged memory dir does nothing.
 
 set -euo pipefail
 
@@ -227,9 +227,9 @@ fi
 # content changed. Passing the path forward is what makes the nudge actionable in
 # precisely the session the resolution above was written for.
 if [ -n "$count" ] && [ "$count" != "0" ]; then
-  msg="You have ${count} local Claude Code memories in this project that may not be synced to Mollow yet. Run the /memory-mirror:import-local-memories skill with --dir ${mem_dir} to import them."
+  msg="You have ${count} local Claude Code memories in this project that may not be synced to Mollow yet. Run the /mollow-claude:import-local-memories skill with --dir ${mem_dir} to import them."
 else
-  msg="This project has local Claude Code memory files that may not be synced to Mollow. Run the /memory-mirror:import-local-memories skill with --dir ${mem_dir} to import them."
+  msg="This project has local Claude Code memory files that may not be synced to Mollow. Run the /mollow-claude:import-local-memories skill with --dir ${mem_dir} to import them."
 fi
 
 mm_emit_context "SessionStart" "$msg"

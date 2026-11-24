@@ -25,7 +25,7 @@ set -euo pipefail
 # "posted" is observed rather than inferred — a hook that exits early and a hook
 # whose request failed would otherwise read the same.
 #
-# Run: bash plugins/memory-mirror/hooks/test-capture-guard.sh
+# Run: bash plugins/mollow-claude/hooks/test-capture-guard.sh
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOK="$DIR/capture-decision.sh"

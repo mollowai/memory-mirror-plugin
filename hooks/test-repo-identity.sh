@@ -18,7 +18,7 @@ set -euo pipefail
 #   * outside a repository everything degrades to the old basename rather than
 #     erroring, because these run inside hooks that must never break a session.
 #
-# Run: bash plugins/memory-mirror/hooks/test-repo-identity.sh
+# Run: bash plugins/mollow-claude/hooks/test-repo-identity.sh
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

@@ -37,7 +37,7 @@
 # Posts go through a fake `curl` on PATH, so what is asserted is the real request
 # body rather than a reimplementation of the hook's jq.
 #
-# Run: bash plugins/memory-mirror/hooks/test-decision-calibration.sh
+# Run: bash plugins/mollow-claude/hooks/test-decision-calibration.sh
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOK="$DIR/capture-decision.sh"

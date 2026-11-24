@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Package memory-mirror as a customer-installable Claude Code plugin bundle (MOL-7864).
+# Package mollow-claude as a customer-installable Claude Code plugin bundle (MOL-7864).
 #
 # Produces a self-contained marketplace directory a NON-MOLLOW machine can install
 # with the standard `claude plugin marketplace add` / `claude plugin install` flow
@@ -9,7 +9,7 @@ set -euo pipefail
 # local-predicate path.
 #
 # What this does, in order:
-#   1. Stage a copy of plugins/memory-mirror/.
+#   1. Stage a copy of plugins/mollow-claude/.
 #   2. MOL-2182 strip: remove the monorepo-specific predicate shell + its test
 #      (guardrails-gate.sh sources them under `[ -f ]`, so removal only degrades
 #      the gate to portable-doctrine + server-rules, never breaks it).
@@ -18,16 +18,16 @@ set -euo pipefail
 #      authored file, if dropped in beforehand, wins).
 #   4. Release gate: run the MOL-2182 sanitizer on the active data file and assert
 #      the stripped monorepo file is gone. Abort the build on any violation.
-#   5. Wrap it in a standalone .claude-plugin/marketplace.json.
+#   5. Wrap it in a standalone, generated .claude-plugin/marketplace.json (not committed).
 #   6. Emit a .tgz (skipped with --dry-run).
 #
 # Usage:
-#   scripts/package-plugin.sh [--out DIR] [--dry-run]
-#     --out DIR    where to build (default: <repo>/dist/memory-mirror-plugin-pkg)
+#   plugins/mollow-claude/scripts/package-plugin.sh [--out DIR] [--dry-run]
+#     --out DIR    where to build (default: <repo>/dist/mollow-claude-plugin-pkg)
 #     --dry-run    stage + sanitize + validate structure; do NOT write the tarball
 
-PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # plugins/memory-mirror
-PLUGIN_NAME="memory-mirror"
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # plugins/mollow-claude
+PLUGIN_NAME="mollow-claude"
 MARKET_NAME="mollow"
 VERSION="$(jq -r '.version // "0.0.0"' "$PLUGIN_DIR/.claude-plugin/plugin.json" 2>/dev/null || echo 0.0.0)"
 
@@ -41,7 +41,7 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$OUT" ] || OUT="$(cd "$PLUGIN_DIR/../.." && pwd)/dist/memory-mirror-plugin-pkg"
+[ -n "$OUT" ] || OUT="$(cd "$PLUGIN_DIR/../.." && pwd)/dist/mollow-claude-plugin-pkg"
 
 command -v jq >/dev/null 2>&1 || { echo "package: jq required" >&2; exit 2; }
 
@@ -53,7 +53,7 @@ command -v jq >/dev/null 2>&1 || { echo "package: jq required" >&2; exit 2; }
 # still see a passing dry-run. A fresh dir always re-stages from current inputs and
 # leaves $OUT (which real builds share, e.g. --out ./dist) completely untouched.
 if [ "$DRY_RUN" = 1 ]; then
-  OUT="$(mktemp -d "${TMPDIR:-/tmp}/memory-mirror-pkg.XXXXXX")"
+  OUT="$(mktemp -d "${TMPDIR:-/tmp}/mollow-claude-pkg.XXXXXX")"
   trap 'rm -rf "$OUT"' EXIT
 fi
 
@@ -131,7 +131,7 @@ fi
 mkdir -p "$BUNDLE/.claude-plugin"
 jq -n --arg n "$MARKET_NAME" --arg p "$PLUGIN_NAME" --arg v "$VERSION" '{
   name: $n,
-  description: "Mollow memory-mirror plugin for Claude Code.",
+  description: "The Mollow plugin for Claude Code.",
   owner: { name: "Mollow" },
   plugins: [ { name: $p, source: ("./" + $p), version: $v } ]
 }' > "$BUNDLE/.claude-plugin/marketplace.json"

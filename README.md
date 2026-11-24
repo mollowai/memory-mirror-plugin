@@ -13,7 +13,7 @@ Memory Mirror gives Claude Code persistent memory that works across sessions and
 ## Install
 
 ```
-/plugin install memory-mirror
+/plugin install mollow-claude
 ```
 
 On first use, Claude Code will open your browser to sign in to your Mollow account. After that, authentication is automatic.
@@ -22,20 +22,20 @@ On first use, Claude Code will open your browser to sign in to your Mollow accou
 
 | Skill | What it does |
 |-------|-------------|
-| `/memory-mirror:recall` | Search your memory for past decisions, conversations, and knowledge |
-| `/memory-mirror:remember` | Explicitly save something for future sessions |
-| `/memory-mirror:import-local-memories` | Import your local Claude Code memory files (`~/.claude/projects/<project>/memory/`) into Mollow, with full provenance |
-| `/memory-mirror:what-happened` | Show your recent activity across all connected AI apps |
-| `/memory-mirror:status` | Check connection health and memory stats |
-| `/memory-mirror:sync` | Manually checkpoint the current session |
-| `/memory-mirror:verify` | Prove which local memory files are present in Mollow (read-only diff), and repair what's missing |
-| `/memory-mirror:connect` | Switch between production, staging, and local dev environments |
+| `/mollow-claude:recall` | Search your memory for past decisions, conversations, and knowledge |
+| `/mollow-claude:remember` | Explicitly save something for future sessions |
+| `/mollow-claude:import-local-memories` | Import your local Claude Code memory files (`~/.claude/projects/<project>/memory/`) into Mollow, with full provenance |
+| `/mollow-claude:what-happened` | Show your recent activity across all connected AI apps |
+| `/mollow-claude:status` | Check connection health and memory stats |
+| `/mollow-claude:sync` | Manually checkpoint the current session |
+| `/mollow-claude:verify` | Prove which local memory files are present in Mollow (read-only diff), and repair what's missing |
+| `/mollow-claude:connect` | Switch between production, staging, and local dev environments |
 
 ## Hooks
 
 The plugin automatically handles session lifecycle:
 
-- **SessionStart** — loads your memory context (skills, recent sessions, project memories), and syncs this project's local Claude Code memory files into Mollow when they change (silently if a `mol_*` API key is configured, otherwise it nudges you to run `/memory-mirror:import-local-memories`)
+- **SessionStart** — loads your memory context (skills, recent sessions, project memories), and syncs this project's local Claude Code memory files into Mollow when they change (silently if a `mol_*` API key is configured, otherwise it nudges you to run `/mollow-claude:import-local-memories`)
 - **PreCompact** — saves unsaved decisions before context compression
 - **Stop** — saves a session summary when you're done
 
@@ -71,9 +71,9 @@ Memory Mirror learns from your conversations across platforms:
 The plugin connects to production by default. To switch environments:
 
 ```
-/memory-mirror:connect staging
-/memory-mirror:connect dev
-/memory-mirror:connect production
+/mollow-claude:connect staging
+/mollow-claude:connect dev
+/mollow-claude:connect production
 ```
 
 This edits the plugin's own `.mcp.json` in the plugin's install directory, not a file in your project. Restart Claude Code after switching.
@@ -88,18 +88,18 @@ what's actually in the cloud rather than trusting local state.
 
 ```bash
 # Is everything, across every project, present in the current target env?
-python3 plugins/memory-mirror/scripts/memory_sync.py --all verify
+python3 plugins/mollow-claude/scripts/memory_sync.py --all verify
 
 # Where am I pointed, do the three config sources agree, and will entries route?
-python3 plugins/memory-mirror/scripts/memory_sync.py status
+python3 plugins/mollow-claude/scripts/memory_sync.py status
 
 # Repair ONE project that you know does NOT route to a Space. Read the section below
 # before running this — on a routed project it creates private duplicates.
-python3 plugins/memory-mirror/scripts/memory_sync.py \
+python3 plugins/mollow-claude/scripts/memory_sync.py \
   --dir ~/.claude/projects/-Users-me-dev-myrepo/memory push --repair
 
 # Route this project's memories to its Space. No --repair — see below.
-python3 plugins/memory-mirror/scripts/memory_sync.py --project "$(git rev-parse --show-toplevel)" push
+python3 plugins/mollow-claude/scripts/memory_sync.py --project "$(git rev-parse --show-toplevel)" push
 ```
 
 ### `--repair` has a precondition the tool cannot check
@@ -122,7 +122,7 @@ holds.
 
 Every `push` writes the per-entry hashes the import returned under `~/.mollow/` and
 **prints the absolute path** (the `HASHES_PATH` constant in
-`plugins/memory-mirror/scripts/memory_sync.py`). Pass one to `verify_stored_memory`:
+`plugins/mollow-claude/scripts/memory_sync.py`). Pass one to `verify_stored_memory`:
 `verified: true` means that row **exists in Mollow with its content intact**.
 
 **It does not mean the row reached its Space.** The lookup is global by hash and
