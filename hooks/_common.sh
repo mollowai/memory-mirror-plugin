@@ -770,13 +770,14 @@ mm_rail_streak_threshold() {
 # outage (MOL-9571). Shared by `recall-decisions.sh` and `supply-ground.sh` so
 # the two rails cannot word or count it differently.
 #
-#   mm_rail_outcome <rail> <session> <event> unreachable|ok <raw-result> [class]
+#   mm_rail_outcome <rail> <session> <event> unreachable|ok|degraded <raw-result> [class]
 #
-# `ok` is downgraded to `unreachable:unparseable` here when the body is not a
-# JSON object: a 200 carrying a Cloudflare HTML page or half a document is read
-# by every later `jq` as nothing, so the turn is exactly as ungrounded as on a
-# timeout — and recording it as a success would clear the streak mid-outage
-# (Greptile on #8718). One check here, so neither hook can forget it.
+# `ok` and `degraded` are downgraded to `unreachable:unparseable` here when the
+# body is not a JSON object: a 200 carrying a Cloudflare HTML page or half a
+# document is read by every later `jq` as nothing, so the turn is exactly as
+# ungrounded as on a timeout — and recording it as a success would clear the
+# streak mid-outage (Greptile on #8718). One check here, so neither hook can
+# forget it.
 #
 # `unreachable` writes `<rail>_unreachable:<class>` with the curl detail as the
 # fifth column, bumps the streak, and — at exactly the threshold, never before
@@ -784,6 +785,28 @@ mm_rail_streak_threshold() {
 # for `<event>`. `ok` writes `<rail>_ok` with the same detail to
 # `~/.mollow/rail-latency.log` (see `mm_rail_latency_note` for why not the
 # ledger) and clears the streak.
+#
+# ## `degraded` — answered, but a leg of the answer is missing (MOL-9707)
+#
+# The recall endpoint runs its `:contradictions` lookup as a separate leg under
+# its own deadline and, when that deadline expires, answers 200 with
+# `contradictions: []` and `degraded: ["contradictions"]`. Measured at ~249 a
+# day in production. That call is neither a success nor an outage, and writing
+# it as either loses the thing worth counting:
+#
+#   * NOT `ok` — the turn is missing a lookup it asked for. `recall_ok` in the
+#     latency log is read as "the rail answered this prompt in full", and
+#     counting a half-answer there makes MOL-9571's miss ledger report exactly
+#     the class of failure it was built to detect as healthy.
+#   * NOT `unreachable` — the rail answered, inside its budget, and the rest of
+#     the response is usable. Bumping the outage streak would emit "the last 5
+#     calls got no usable answer" about a working rail, and the fix for a slow
+#     leg is not the fix for an unreachable endpoint.
+#
+# So it writes `<rail>_degraded:<class>` to the supply ledger beside the misses
+# (where `class` names the legs, e.g. `contradictions`) and CLEARS the streak,
+# because the rail is up. The caller is responsible for telling the session
+# which leg is missing; this records it.
 #
 # ## Why `ok` is recorded at all
 #
@@ -797,13 +820,24 @@ mm_rail_outcome() {
   local rail="$1" sid="$2" event="$3" outcome="$4" raw="${5:-}" class="${6:-}"
   local detail
   detail="$(mm_seam_split_detail "$raw")"
-  if [ "$outcome" = ok ] &&
+  if { [ "$outcome" = ok ] || [ "$outcome" = degraded ]; } &&
     ! mm_seam_split_body "$raw" | jq -e 'type == "object"' >/dev/null 2>&1; then
     outcome=unreachable
     class=unparseable
   fi
   if [ "$outcome" = ok ]; then
     mm_rail_latency_note "${rail}_ok" "${sid:--}" "-" "$detail"
+    mm_rail_streak "$rail" "$sid" ok >/dev/null
+    return 0
+  fi
+  if [ "$outcome" = degraded ]; then
+    # `unknown` rather than `mm_rail_failure_class`: that function reads curl's
+    # exit code, which on this path is 0 — the transport worked. The class here
+    # names the LEGS the server reported as degraded and only the caller knows
+    # them, so an absent class is recorded as absent instead of being inferred
+    # into a transport fault the ledger would then count as one.
+    [ -n "$class" ] || class=unknown
+    mm_supply_note "${rail}_degraded:${class}" "${sid:--}" "-" "$detail"
     mm_rail_streak "$rail" "$sid" ok >/dev/null
     return 0
   fi

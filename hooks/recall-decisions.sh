@@ -95,10 +95,59 @@ if [ -z "$resp" ]; then
   mm_rail_outcome recall "${sid:-}" UserPromptSubmit unreachable "$raw"
   exit 0
 fi
+# Which legs of the answer are MISSING, as the server itself reported them
+# (MOL-9707). `:contradictions` runs under its own deadline and, when it
+# expires, the response carries `contradictions: []` with
+# `degraded: ["contradictions"]` — `[]` because nothing was computed, not
+# because nothing was found. Measured at ~249 a day in production, on the hook
+# that fires on every prompt of every session.
+#
+# Read here, before anything renders or records, because both of those were
+# wrong without it: the turn was told there were no contradictions, and the call
+# was written to the ledger as a clean success.
+#
+# Absent, `null` and `[]` all yield the empty string, so an older server and
+# every undegraded response take exactly the path they took before.
+# A `degraded` that is PRESENT but not a list of leg names is reported as
+# `unknown_shape` rather than as nothing. `[]` for a non-array would restore
+# this exact defect silently — the server could ship a map of leg → reason and
+# the hook would go back to recording `recall_ok` on a half-answer — so an
+# unreadable field is counted as a miss whose legs are unknown, and no notice is
+# rendered, because which lookup is missing cannot be read from it.
+degraded_legs="$(printf '%s' "$resp" | jq -r '
+  (.degraded // [])
+  | if type != "array" then "unknown_shape"
+    else
+      [ .[] | select(type == "string" and . != "") ] as $legs
+      | if ($legs | length) > 0 then ($legs | join(","))
+        elif (length) > 0 then "unknown_shape"
+        else "" end
+    end
+  ' 2>/dev/null || true)"
+
 # Not a bare success: `mm_rail_outcome` downgrades a body that is not a JSON
 # object to `recall_unreachable:unparseable`, and the jq reads below then find
 # nothing and exit silently — the same silence, now on the record.
-mm_rail_outcome recall "${sid:-}" UserPromptSubmit ok "$raw"
+#
+# A degraded response is recorded as `recall_degraded:<legs>` rather than as
+# `recall_ok`. It is a partial answer, and MOL-9571's ledger exists to count
+# memory-rail misses: logging a dropped lookup as a success makes the one
+# instrument that should detect this class of failure report it as healthy. It
+# is not `unreachable` either — see `mm_rail_outcome` for why that would be a
+# different claim about a working rail.
+if [ -n "$degraded_legs" ]; then
+  mm_rail_outcome recall "${sid:-}" UserPromptSubmit degraded "$raw" "$degraded_legs"
+else
+  mm_rail_outcome recall "${sid:-}" UserPromptSubmit ok "$raw"
+fi
+
+# Whether the contradiction lookup is one of the missing legs. Matched as a
+# whole element — the join is comma-separated, so the commas on both ends are
+# what stop a future `contradictions_v2` from reading as this one.
+contradictions_skipped=false
+case ",${degraded_legs}," in
+  *,contradictions,*) contradictions_skipped=true ;;
+esac
 
 # Seen-state (MOL-3755). A finding stays the top-ranked result for as long as the
 # conversation is about it, so without this the same warning is injected into
@@ -134,7 +183,7 @@ resp="$(printf '%s' "$resp" | jq -c --argjson seen "$seen_ids" '
 # Two independent blocks: past decisions (MOL-2334) and any contradiction the
 # nightly sweep already judged (MOL-3755). Either may be absent; jq emits only
 # what is present, and a malformed response yields empty output.
-ctx="$(printf '%s' "$resp" | jq -r '
+ctx="$(printf '%s' "$resp" | jq -r --argjson cskipped "$contradictions_skipped" '
   [
     ( .proposed_answer as $p
       | if $p == null then empty
@@ -166,10 +215,28 @@ ctx="$(printf '%s' "$resp" | jq -r '
              | join("\n"))
         end ),
     ( (.contradictions // []) as $cs
-      | if ($cs | length) == 0 then empty
-        else
+      | if ($cs | length) > 0 then
           "Possible contradiction in the memory this touches — surfaced for awareness, not a blocker. Both sides may be legitimate (a changed mind reads the same as an error). Mention it only if it bears on the request:\n"
           + ([ $cs[] | "- " + (.rationale // "") ] | join("\n"))
+        elif $cskipped then
+          # Findings present outrank the skip notice: the server sends `[]` with
+          # this leg degraded, so the two cannot both be true — and if they ever
+          # are, dropping real findings to report a skip is the worse failure.
+          # Says WHAT happened and not WHY. `degraded` is reported for a leg
+          # that missed its deadline AND for one that raised — a failed query
+          # reaches the response the same way — and the body does not say
+          # which. Naming a timeout here would point the reader at one of two
+          # causes on evidence that cannot distinguish them (Greptile P2 on
+          # #8788). NO APOSTROPHE IN THIS COMMENT: the jq program is shell
+          # single-quoted, so one would end the quote and the program with it —
+          # which fails as 11 unrelated assertions, not as a syntax error.
+          "Contradiction check DID NOT COMPLETE on this turn: the server reported this lookup as"
+          + " degraded, so it returned no usable result; the response does not say why. Nothing was"
+          + " checked, so this is a MISSING result and not an empty one. Do not read it as \"there"
+          + " are no contradictions\" — memory may hold one that bears on this request, and nothing"
+          + " looked. If a contradiction would change the answer here, say the check did not run"
+          + " rather than treating the memory as clean."
+        else empty
         end )
   ] | join("\n\n")
   ' 2>/dev/null || true)"
