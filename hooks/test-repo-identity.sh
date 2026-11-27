@@ -169,6 +169,43 @@ eq "outside a repo, project degrades to the basename" "not-a-repo" "$(mm_project
 eq "empty cwd yields nothing" "" "$(mm_project_of "")"
 rm -rf "$t"
 
+# ── MOL-9746: the host case folds, and ONLY the host ──────────────────────────
+#
+# A host is case-insensitive by DNS, but the server's routing index is a byte
+# comparison, so a capitalised host made a hand-typed route silently unreachable:
+# a production row read `GitHub.com/mollowai/monorepo` while the client sent
+# `github.com/...`, and 0 of that user's 975 sessions stamped to the routed
+# Space. `Mollow.Memory.Destinations.canonicalize_repo/1` folds the host
+# identically — these cases and their `destinations_test.exs` counterparts must
+# never diverge, because agreeing exactly is the property that matters.
+t="$(tmpdir)"
+i=0
+for pair in \
+  "https://GitHub.com/mollowai/monorepo.git|github.com/mollowai/monorepo" \
+  "HTTPS://github.com/mollowai/monorepo|github.com/mollowai/monorepo" \
+  "Https://GitHub.Com/mollowai/monorepo.git|github.com/mollowai/monorepo" \
+  "git@GitHub.com:mollowai/monorepo.git|github.com/mollowai/monorepo" \
+  "ssh://git@GITHUB.COM:22/mollowai/monorepo.git|github.com/mollowai/monorepo"; do
+  url="${pair%%|*}"
+  want="${pair##*|}"
+  i=$((i + 1))
+  make_repo "$t/case$i" "$url"
+  eq "host folds: $url" "$want" "$(mm_repo_of "$t/case$i")"
+done
+
+# The owner and repository segments must NOT fold: GitHub preserves their case,
+# so two spellings of them are not reliably the same repository.
+make_repo "$t/ownercase" "https://GitHub.com/MollowAI/MonoRepo.git"
+eq "only the host folds — owner and repo keep their case" \
+  "github.com/MollowAI/MonoRepo" "$(mm_repo_of "$t/ownercase")"
+
+# The no-remote fallback is a DIRECTORY NAME, not a host. Folding it would orphan
+# sessions already recorded under that spelling — one production user has
+# `RogerCRM` rows from exactly this fallback.
+make_repo "$t/RogerCRM"
+eq "a bare directory name keeps its case" "RogerCRM" "$(mm_repo_of "$t/RogerCRM")"
+rm -rf "$t"
+
 echo
 echo "════════════════════════════════════════"
 echo "Results: ${PASS} passed, ${FAIL} failed"

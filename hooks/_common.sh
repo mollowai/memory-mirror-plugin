@@ -1333,8 +1333,17 @@ mm_repo_of() {
     # the colon rule and left scp-style URLs as `host:owner/repo`. A `:port` is
     # stripped before the scp colon rule so `ssh://git@host:22/o/r` does not
     # become `host/22/o/r`.
+    #
+    # MOL-9746: the scheme class is [a-zA-Z] because it was [a-z] and an uppercase
+    # scheme was therefore never stripped, and the HOST is lowercased because a
+    # host is case-insensitive by DNS while the server's routing index is a byte
+    # comparison. `Mollow.Memory.Destinations.canonicalize_repo/1` folds the host
+    # identically; neither side may fold alone, which is the whole point of the
+    # rule-for-rule agreement. The awk guard is NF>1: a single segment is the
+    # no-remote basename fallback below, not a host, and its case is identity.
     printf '%s\n' "$url" \
-      | sed -E 's#^[a-z+]+://##; s#^[^@/]+@##; s#:[0-9]+/#/#; s#:#/#; s#\.git$##; s#^/+##; s#/+$##'
+      | sed -E 's#^[a-zA-Z+]+://##; s#^[^@/]+@##; s#:[0-9]+/#/#; s#:#/#; s#\.git$##; s#^/+##; s#/+$##' \
+      | awk -F/ 'BEGIN { OFS = "/" } NF > 1 { $1 = tolower($1) } { print }'
     return 0
   fi
 
