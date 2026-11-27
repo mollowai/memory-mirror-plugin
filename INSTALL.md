@@ -21,6 +21,25 @@ mollow-claude-plugin/
     skills/…
 ```
 
+### The messages-to-humans lint, and why it is inert on arrival
+
+The plugin also carries a Slack lint — `hooks/slack-register-gate.sh`, with its
+norm in `skills/messages-to-humans/SKILL.md`. It checks a message you are about
+to post into a channel somebody outside engineering reads: that a person named
+with `@name` is named in the form that actually notifies them, and that a pull
+request number, tracker id, commit hash or file path carries a link.
+
+**It does nothing until you configure it.** Deciding which of your channels have
+a non-engineer in them is not something this plugin can guess, so it reads a
+`hooks/channel-register.json` that the bundle deliberately does **not** contain
+— that file describes one team's channels and is stripped by the packaging step.
+With no register the lint has no opinion and emits nothing. The skill shows the
+file's shape if you want to switch it on.
+
+Two rules deny, three warn, and a deny is challenged **once**: send the identical
+text again and it goes through. `MOLLOW_SLACK_REGISTER_GATE=off` disables it for
+a session.
+
 The **local doctrine** path needs **no Mollow account, key, or URL**, and the
 bundle carries **no credential and no monorepo-specific content** — the packaging
 step strips the internal predicate file and the internal test fixtures and

@@ -40,14 +40,59 @@ else
   echo "    export MOLLOW_MEMORY_API_KEY=<your mol_ workspace key>"
 fi
 
-python3 - "$SETTINGS" "$HOOKS_DIR" "$WITH_GATES" <<'PY'
+# --- stage the Slack register gate OUTSIDE the checkout ------------------------
+#
+# Every other hook here is registered by its path inside this checkout, which is
+# correct for them: they are useful exactly when you are working in this
+# repository. The register gate is not. Its whole purpose is to hold on a
+# checkout whose branch does not carry it — the case that created it is a
+# long-lived branch thousands of commits behind main, where the gate file is
+# absent and the registered command resolves to nothing. A hook
+# whose command is missing does not fail loudly; it does nothing, which is
+# indistinguishable from a post that passed.
+#
+# So this one is COPIED to a user-owned directory and registered from there.
+# Layout is preserved on purpose: the gate finds its library at lib/ beside it,
+# and the library finds the channel register one level up from itself.
+#
+# The trade is staleness — the copy does not follow the checkout, so re-run this
+# installer to refresh it. That is the right way round for a gate: a slightly
+# old rule still runs, where a missing one is silence.
+STAGE_DIR="${MOLLOW_HOOK_STAGE_DIR:-$HOME/.mollow/claude-hooks/messages-to-humans}"
+STAGED_HOOKS_DIR=""
+if [ -f "$HOOKS_DIR/slack-register-gate.sh" ] && [ -f "$HOOKS_DIR/lib/slack-register-decision.sh" ]; then
+  if mkdir -p "$STAGE_DIR/lib" 2>/dev/null      && cp "$HOOKS_DIR/slack-register-gate.sh" "$STAGE_DIR/" 2>/dev/null      && cp "$HOOKS_DIR/lib/slack-register-decision.sh" "$STAGE_DIR/lib/" 2>/dev/null; then
+    # The register is optional and is not shipped publicly. Copy it when this
+    # checkout has one; its absence leaves the gate with no opinion by design.
+    if [ -f "$HOOKS_DIR/channel-register.json" ]; then
+      cp "$HOOKS_DIR/channel-register.json" "$STAGE_DIR/" 2>/dev/null || true
+    fi
+    chmod +x "$STAGE_DIR/slack-register-gate.sh" 2>/dev/null || true
+    STAGED_HOOKS_DIR="$STAGE_DIR"
+    echo "✓ staged the messages-to-humans gate at $STAGE_DIR"
+    echo "  It runs from there, so switching this checkout's branch cannot remove it."
+    echo "  Re-run this installer after pulling to refresh the copy."
+  else
+    echo "⚠ could not stage the messages-to-humans gate — registering it from the checkout"
+    echo "  instead, which means it stops running on a branch that does not carry it."
+  fi
+fi
+
+python3 - "$SETTINGS" "$HOOKS_DIR" "$WITH_GATES" "$STAGED_HOOKS_DIR" <<'PY'
 import json, os, shlex, sys, time
 
 settings_path, hooks_dir, with_gates = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+staged_dir = sys.argv[4] if len(sys.argv) > 4 else ""
+
+# Scripts that must keep running on a checkout whose branch does not carry
+# them, so they are registered from the staged copy when one exists. Everything
+# else stays pinned to the checkout, where it belongs.
+STAGED_SCRIPTS = {"slack-register-gate.sh"}
 
 def cmd(script):
     # Quote the path so a checkout under a directory with spaces still works.
-    return f"bash {shlex.quote(os.path.join(hooks_dir, script))}"
+    base = staged_dir if (script in STAGED_SCRIPTS and staged_dir) else hooks_dir
+    return f"bash {shlex.quote(os.path.join(base, script))}"
 
 # (event, matcher-or-None, [(script, timeout_seconds), ...]) — the NO-GATE set.
 groups = [
@@ -57,6 +102,15 @@ groups = [
     ("PostToolUse", "mcp__mollow__get_session_context", [("grounding-receipt.sh", 5)]),
     ("Stop", None, [("sync-session.sh", 5), ("supply-stop.sh", 5),
                     ("record-sweep-decisions.sh", 6), ("grounding-engagement.sh", 5)]),
+    # The messages-to-humans register gate. In the DEFAULT set rather than behind
+    # --with-gates: that flag fences the BLOCKING guardrails gate, and this one
+    # denies only two mechanical defects (a mention that notifies nobody, an
+    # unresolvable reference in a channel a non-engineer reads), each challenged
+    # once with an identical resend always going through. Everything about HOW a
+    # message is written is a non-blocking warning. It is also inert without a
+    # channel register, which the public plugin does not ship.
+    ("PreToolUse", "mcp__slack-local__conversations_add_message",
+     [("slack-register-gate.sh", 5)]),
 ]
 if with_gates:
     groups += [
