@@ -32,8 +32,11 @@ command -v jq >/dev/null 2>&1 || exit 0
 
 INPUT="$(cat)"
 TOOL_NAME="$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)"
+# MCP tools are let through here and narrowed by hooks.json's matcher, so which
+# MCP tools are gated is decided in ONE place (MOL-9756). Before this, a message
+# to a person — a Slack post, a Linear comment, a PR review — never reached a rule.
 case "$TOOL_NAME" in
-  Bash | Write | Edit | MultiEdit) ;;
+  Bash | Write | Edit | MultiEdit | mcp__*) ;;
   *) exit 0 ;;
 esac
 
@@ -62,6 +65,17 @@ case "$TOOL_NAME" in
   MultiEdit)
     FILE_PATH="$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null || true)"
     CONTENT="$(printf '%s' "$INPUT" | jq -r '[(.tool_input.edits // [])[] | .new_string] | map(select(. != null)) | join("\n")' 2>/dev/null || true)"
+    ;;
+  *)
+    # An MCP tool: every string leaf of the input, values only, keys never — the
+    # server's catch-all (`string_leaves/1` in Mollow.Tacit.Guardrails) read the
+    # same way, so a rule cannot match on one side and miss on the other. A
+    # per-tool case would have to learn each server's field names (`payload`,
+    # `body`, `text`, …) and would drift the first time one is renamed.
+    # FILE_PATH stays empty, so an MCP call can never reach the TDD block.
+    # A non-object tool_input yields nothing, as `matchable_texts(_tool, _input)`
+    # does on the server.
+    CONTENT="$(printf '%s' "$INPUT" | jq -r '[(.tool_input | objects) | .. | strings] | join("\n")' 2>/dev/null || true)"
     ;;
 esac
 

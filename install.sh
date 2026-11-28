@@ -113,10 +113,22 @@ groups = [
      [("slack-register-gate.sh", 5)]),
 ]
 if with_gates:
-    groups += [
-        ("SessionStart", None, [("arm-guardrails.sh", 6)]),
-        ("PreToolUse", "Bash|Write|Edit|MultiEdit", [("guardrails-gate.sh", 5)]),
-    ]
+    groups += [("SessionStart", None, [("arm-guardrails.sh", 6)])]
+    # The gate's matchers are read from hooks.json, the plugin's own registration,
+    # rather than restated here: a second copy lagged once already, and an install
+    # that lags gates nothing on the tools it is missing, silently (MOL-9756).
+    try:
+        with open(os.path.join(hooks_dir, "hooks.json")) as f:
+            plugin_pre = json.load(f)["hooks"]["PreToolUse"]
+        gate_matchers = [g["matcher"] for g in plugin_pre
+                         if any("guardrails-gate.sh" in h.get("command", "") for h in g.get("hooks", []))]
+    except (OSError, ValueError, KeyError, TypeError):
+        gate_matchers = []
+    if not gate_matchers:
+        print(f"cannot read the guardrails matchers from {hooks_dir}/hooks.json — aborting, nothing changed",
+              file=sys.stderr)
+        sys.exit(1)
+    groups += [("PreToolUse", m, [("guardrails-gate.sh", 5)]) for m in gate_matchers]
 
 try:
     with open(settings_path) as f:
@@ -129,8 +141,14 @@ if not isinstance(data, dict):
 
 hooks = data.setdefault("hooks", {})
 
-def present(event, script):
+def present(event, matcher, script):
+    # Keyed on the matcher too: one script can be registered under two matchers
+    # (guardrails-gate.sh is), and a check on the name alone would read the first
+    # registration as the second and skip it. A missing matcher and "" both mean
+    # "every tool", so they compare equal.
     for grp in hooks.get(event, []):
+        if (grp.get("matcher") or None) != matcher:
+            continue
         for h in grp.get("hooks", []):
             if script in h.get("command", ""):
                 return True
@@ -140,7 +158,7 @@ added = []
 for event, matcher, scripts in groups:
     # Idempotent PER SCRIPT: add only the scripts not already wired on this event,
     # so a partial prior install is completed rather than skipped wholesale.
-    missing = [(s, t) for s, t in scripts if not present(event, s)]
+    missing = [(s, t) for s, t in scripts if not present(event, matcher, s)]
     if not missing:
         continue
     hook_list = [{"type": "command", "command": cmd(s), "timeout": t} for s, t in missing]

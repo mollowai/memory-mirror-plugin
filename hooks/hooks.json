@@ -33,6 +33,16 @@
         ]
       },
       {
+        "matcher": "^mcp__.+__(.*_)?(add|create|send|schedule|post|save|update|write|reply|comment|draft)(_.*)?$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/guardrails-gate.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "mcp__slack-local__conversations_add_message",
         "hooks": [
           {
